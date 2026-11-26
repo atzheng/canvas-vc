@@ -29,6 +29,7 @@ src/canvas_sync/
     bodies.py                  .canvas/bodies.json                        (§6)
   remote/
     http.py                    CanvasClient                               (§7)
+    context.py                 FetchContext, ApplyContext                 (§8)
     allowlist.py               ALLOWED endpoints                          (§7)
     fetch.py                   fetch_course(): calls each type's reader   (§8)
     pages.py announcements.py assignments.py files.py modules.py roster.py
@@ -265,7 +266,7 @@ Round-trip property (tested with hypothesis over a Markdown corpus):
 ```python
 # remote/http.py
 class CanvasClient:
-    def __init__(self, base_url: str, token: str, *, mode: Literal["read", "write"],
+    def __init__(self, base_url: str, token: str, *, course_id: int, mode: Literal["read", "write"],
                  transport: httpx.BaseTransport | None = None): ...
     def get(self, path: str, params=None) -> Any              # JSON; follows Link pagination, returns full list
     def get_one(self, path: str, params=None) -> Any
