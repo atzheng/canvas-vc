@@ -380,6 +380,11 @@ files:                            # per-file, written by the tool: IDs + exact o
   solutions/hw1-solutions.ipynb: {canvas_id: 5551299, sha256: "…", lock: 2026-12-20 23:59}
 ```
 
+`unlock` and `lock` can be `false` (in an entry, rule or defaults) to mean "no
+date", overriding a date from an earlier layer; leaving them out inherits.
+`fetch` writes `lock: false` on a file only when a rule would otherwise give it
+a lock.
+
 `fetch` writes the `files:` section. A file's settings on Canvas that match
 what the rules imply are *not* written out per file, so the `rules:` section
 stays the place people edit, and changes to it merge cleanly.
