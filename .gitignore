@@ -3,3 +3,10 @@
 .dolt/
 *.db
 .beads-credential-key
+.claude/worktrees/
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+dist/
