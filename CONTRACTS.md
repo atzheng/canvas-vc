@@ -160,6 +160,31 @@ class TypeSpec(Protocol):               # one per type, registered in model/__in
 REGISTRY: dict[Kind, TypeSpec]
 ```
 
+`load` returns objects keyed by tree path, in on-Canvas order for modules.
+`dump` returns `{tree path: exact bytes}` for the files the type owns, must not
+depend on dict order of its input, and must satisfy
+`dump(load(dump(objs))) == dump(objs)`; `tests/helpers/fixed_point.py`
+(`assert_spec_fixed_point`, `assert_spec_normalizes`) checks this and every
+type bead calls it. `CanvasObject.key(path)` derives the kind from the path
+(`kind_for_path`: `modules.yaml#...`, else the first folder matched against the
+registered specs).
+
+The FILE spec has one extra, optional duty because `files/_meta.yaml` holds
+`defaults` and `rules`, which a `dict[str, CanvasObject]` cannot carry:
+
+```python
+class FilesMetaSpec(TypeSpec, Protocol):
+    def load_files_meta(self, root: Path, cfg: CourseConfig) -> FilesMeta
+    def dump_files_meta(self, meta: FilesMeta, cfg: CourseConfig) -> dict[str, bytes]
+```
+
+If the FILE spec has these methods, `load_tree`/`dump_tree` use them for
+`Course.files_meta` (keys of `FilesMeta.files` are tree paths such as
+`files/lectures/01.pdf`) and mirror its entries into `Course.objects`; `dump`
+is then not called for FILE. Without them, `load`/`dump` carry the entries only.
+`dump_tree` gives modules the keys `modules.yaml#<name>` (`#<name>#2` for a
+repeated name), in `Course.modules` order.
+
 `model/__init__.py` registers **all five** TypeSpecs from the start (F3
 creates them as stubs that load and dump nothing). Type beads fill in their
 own module and never edit `model/__init__.py` or `course.py`. TypeSpecs whose
@@ -207,10 +232,39 @@ def dump_tree(course: Course) -> dict[str, bytes]    # path -> exact file conten
 ## 5. Canonical serialization (`model/serialize.py`)
 
 ```python
-def dump_yaml(data: Mapping | Sequence, key_order: Sequence[str]) -> str
-def dump_frontmatter(meta: Mapping, body: str, key_order: Sequence[str]) -> str
-def load_frontmatter(text: str) -> tuple[dict, str]
+def dump_yaml(data: Mapping | Sequence, key_order: Sequence[str], *,
+              nested_orders: Mapping[str, Sequence[str]] | None = None) -> str
+def dump_frontmatter(meta: Mapping, body: str, key_order: Sequence[str], *,
+                     nested_orders: Mapping[str, Sequence[str]] | None = None) -> str
+def load_frontmatter(text: str, source: str = ...) -> tuple[dict, str]
+def load_yaml(text: str, source: str = ...) -> object      # tolerant; raises ValidationError
+def normalize_body(body: str) -> str
 ```
+
+`key_order` orders the keys of every mapping in the document. `nested_orders`
+gives a different order for the mappings found under a key name (for example
+`{"items": ITEM_KEY_ORDER, "overrides": overrides.KEY_ORDER}` for
+`modules.yaml`), so nested objects keep their own order. `None` values in a
+mapping are omitted. Datetimes must be zone-aware and are written with
+`format_local`. Strings are quoted whenever a plain scalar could be read back
+as anything else (YAML 1.1 and 1.2 booleans, nulls, numbers, dates, sexagesimal
+`12:30`), contain `: `, `#`, control or non-printable characters, or have
+leading/trailing spaces. Floats that are whole numbers are written as ints.
+`dump_yaml` / `dump_frontmatter` are the only YAML writers; python-frontmatter
+is not used (the front-matter splitter is `load_frontmatter`).
+
+`load_frontmatter`: strips a BOM, accepts CRLF and a missing final newline,
+ends the frontmatter at the first `---` line (the body may contain `---`),
+treats a file with no opening `---` as all body, and raises `ValidationError`
+for unterminated or non-mapping frontmatter and duplicate keys. The body has
+CRLF normalised, leading blank lines and trailing whitespace removed
+(`normalize_body`); `dump_frontmatter` applies the same normalisation so the
+format is a fixed point. Values come back raw (a date-only value is a `date`
+or `str`); types convert with `dates.parse_local`.
+
+`dump_tree` also writes `course.yaml` (fields that differ from the defaults,
+`HH:MM` times quoted, no trailing `/` on a bare host) and `roster.yaml` (only
+when not empty), with the key orders in `model/course.py`.
 
 Rules: block style; 2-space indent; keys in `key_order`, then any other keys
 sorted; values equal to the course default are left out (the caller drops
