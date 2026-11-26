@@ -161,6 +161,10 @@ REGISTRY: dict[Kind, TypeSpec]
 ```
 
 `load` returns objects keyed by tree path, in on-Canvas order for modules.
+A `load` must raise `ValidationError` (one line, naming both paths) when two objects
+of its type carry the same `canvas_id`. Folder-per-type loads (pages, announcements)
+also raise for any non-hidden entry that is not a top-level `*.md` file, so a moved
+file can never look like a deletion.
 `dump` returns `{tree path: exact bytes}` for the files the type owns, must not
 depend on dict order of its input, and must satisfy
 `dump(load(dump(objs))) == dump(objs)`; `tests/helpers/fixed_point.py`

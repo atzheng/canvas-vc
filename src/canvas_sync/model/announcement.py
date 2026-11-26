@@ -1,23 +1,48 @@
-"""Announcement model (CONTRACTS.md section 4). Stub: load and dump nothing yet."""
+"""Announcement model and TypeSpec (CONTRACTS.md sections 4 and 5; SPEC.md "Announcements")."""
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal, cast
+
+from pydantic import ValidationError as PydanticValidationError
 
 from canvas_sync.config import CourseConfig
-from canvas_sync.dates import LocalDT
+from canvas_sync.dates import LocalDT, parse_local
+from canvas_sync.errors import ValidationError
 from canvas_sync.model.base import CanvasObject, Kind
+from canvas_sync.model.serialize import dump_frontmatter, load_frontmatter
 
 KEY_ORDER = ["canvas_id", "title", "post_at", "published", "body_format"]
 
 
 class Announcement(CanvasObject):
+    # canvas_id is the discussion-topic id (int); None for a new announcement.
     title: str = ""
     post_at: LocalDT | None = None
-    published: bool = True
+    published: bool = True  # model default, not a course.yaml default; True is not written
     body_format: Literal["md", "html"] = "md"
     body: str = ""
+
+
+def _parse(text: str, source: str, cfg: CourseConfig) -> Announcement:
+    meta, body = load_frontmatter(text, source)
+    for key in meta:
+        if key not in KEY_ORDER:
+            raise ValidationError(f"{source}: unknown frontmatter key {key!r}")
+    meta = {k: v for k, v in meta.items() if v is not None}
+    if "post_at" in meta:
+        meta["post_at"] = parse_local(meta["post_at"], cfg.tz, cfg.defaults.unlock_time)
+    cid = meta.get("canvas_id")
+    if isinstance(cid, str):
+        if not cid.strip().isdigit():
+            raise ValidationError(f"{source}: canvas_id {cid!r} is not an integer")
+        meta["canvas_id"] = int(cid)
+    try:
+        return Announcement(body=body, **meta)
+    except PydanticValidationError as e:
+        bad = ", ".join(str(err["loc"][0]) for err in e.errors() if err["loc"])
+        raise ValidationError(f"{source}: invalid frontmatter value for {bad}: {e}") from None
 
 
 class _Spec:
@@ -25,10 +50,35 @@ class _Spec:
     folder = "announcements"
 
     def load(self, root: Path, cfg: CourseConfig) -> dict[str, CanvasObject]:
-        return {}
+        out: dict[str, CanvasObject] = {}
+        seen: dict[object, str] = {}
+        folder = root / self.folder
+        entries = sorted(folder.iterdir()) if folder.is_dir() else []
+        for p in entries:
+            if p.name.startswith("."):
+                continue
+            rel = f"{self.folder}/{p.name}"
+            if not (p.is_file() and p.suffix == ".md"):
+                raise ValidationError(
+                    f"{rel}: only top-level .md files are allowed in {self.folder}/"
+                )
+            obj = _parse(p.read_text(encoding="utf-8"), rel, cfg)
+            if obj.canvas_id is not None:
+                if obj.canvas_id in seen:
+                    raise ValidationError(
+                        f"{rel}: duplicate canvas_id {obj.canvas_id!r} (also in {seen[obj.canvas_id]})"  # noqa: E501
+                    )
+                seen[obj.canvas_id] = rel
+            out[rel] = obj
+        return out
 
     def dump(self, objs: dict[str, CanvasObject], cfg: CourseConfig) -> dict[str, bytes]:
-        return {}
+        files: dict[str, bytes] = {}
+        for path in sorted(objs):
+            ann = cast("Announcement", objs[path])
+            meta: dict[str, Any] = ann.model_dump(exclude={"body"}, exclude_defaults=True)
+            files[path] = dump_frontmatter(meta, ann.body, KEY_ORDER).encode("utf-8")
+        return files
 
 
 ANNOUNCEMENT_SPEC = _Spec()
