@@ -6,9 +6,9 @@ import os
 from datetime import time
 from pathlib import Path
 from typing import Literal
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from zoneinfo import ZoneInfo, available_timezones
 
-from pydantic import BaseModel, HttpUrl, field_validator
+from pydantic import BaseModel, ConfigDict, HttpUrl, field_validator
 from pydantic import ValidationError as PydanticValidationError
 from ruamel.yaml import YAML
 from ruamel.yaml.error import YAMLError
@@ -17,17 +17,23 @@ from canvas_sync.errors import ConfigError
 
 
 class AssignmentDefaults(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     submission_types: list[str] = ["online_upload"]
     due_time: time = time(23, 59)
 
 
 class Defaults(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     published: bool = False
     unlock_time: time = time(9, 0)
     assignment: AssignmentDefaults = AssignmentDefaults()
 
 
 class CourseConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     canvas_url: HttpUrl
     course_id: int
     timezone: str  # IANA name; validated with zoneinfo
@@ -39,10 +45,9 @@ class CourseConfig(BaseModel):
     @field_validator("timezone")
     @classmethod
     def _check_timezone(cls, v: str) -> str:
-        try:
-            ZoneInfo(v)
-        except (ZoneInfoNotFoundError, ValueError, OSError):
-            raise ValueError(f"unknown IANA timezone {v!r}") from None
+        # Exact match: ZoneInfo() is case-insensitive on some filesystems only.
+        if v not in available_timezones():
+            raise ValueError(f"unknown IANA timezone {v!r}")
         return v
 
     @property
@@ -72,8 +77,10 @@ def load_config(root: Path) -> CourseConfig:
 
 
 def get_token(cfg: CourseConfig) -> str:
-    """Raises ConfigError if the env var is unset or empty."""
+    """Strips whitespace; raises ConfigError if unset, empty or containing whitespace."""
     token = os.environ.get(cfg.token_env, "").strip()
     if not token:
-        raise ConfigError(f"environment variable {cfg.token_env} is not set")
+        raise ConfigError(f"environment variable {cfg.token_env} is not set or empty")
+    if any(c.isspace() for c in token):
+        raise ConfigError(f"environment variable {cfg.token_env} contains whitespace")
     return token

@@ -58,3 +58,28 @@ def test_get_token(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         get_token(cfg)
     monkeypatch.setenv("MY_TOK", "dummy")
     assert get_token(cfg) == "dummy"
+
+
+def test_unknown_key_rejected(tmp_path: Path) -> None:
+    text = GOOD.replace("due_time", "due_tmie")
+    with pytest.raises(ConfigError, match="due_tmie") as e:
+        load_config(write(tmp_path, text))
+    assert "\n" not in str(e.value)
+
+
+def test_timezone_case_sensitive(tmp_path: Path) -> None:
+    with pytest.raises(ConfigError, match="timezone"):
+        load_config(write(tmp_path, GOOD.replace("America/Vancouver", "america/vancouver")))
+
+
+def test_token_whitespace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg = load_config(write(tmp_path, GOOD))
+    monkeypatch.setenv("CANVAS_TOKEN", "  abc123\n")
+    assert get_token(cfg) == "abc123"
+    monkeypatch.setenv("CANVAS_TOKEN", "   ")
+    with pytest.raises(ConfigError):
+        get_token(cfg)
+    monkeypatch.setenv("CANVAS_TOKEN", "abc 123")
+    with pytest.raises(ConfigError) as e:
+        get_token(cfg)
+    assert "abc" not in str(e.value)

@@ -3,7 +3,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from canvas_sync.dates import format_local, from_canvas, parse_local, to_canvas
+from canvas_sync.dates import format_local, from_canvas, is_ambiguous_local, parse_local, to_canvas
 from canvas_sync.errors import ValidationError
 
 VAN = ZoneInfo("America/Vancouver")
@@ -57,5 +57,31 @@ def test_roundtrip_across_dst() -> None:
         dt = parse_local(naive, VAN, T)
         back = from_canvas(to_canvas(dt), VAN)
         assert back is not None
-        assert back == dt
+        assert to_canvas(back) == to_canvas(dt)
         assert format_local(back) == format_local(dt)
+
+
+def test_seconds_preserved() -> None:
+    s = "2025-03-10T06:59:59Z"
+    dt = from_canvas(s, VAN)
+    assert dt is not None
+    text = format_local(dt)
+    assert text == "2025-03-09 23:59:59"
+    assert to_canvas(parse_local(text, VAN, T)) == s
+    assert format_local(parse_local("2025-03-09 23:59:00", VAN, T)) == "2025-03-09 23:59"
+
+
+def test_fold_limitation_and_ambiguity() -> None:
+    second = from_canvas("2025-11-02T09:30:00Z", VAN)
+    assert second is not None
+    assert format_local(second) == "2025-11-02 01:30"
+    assert is_ambiguous_local(second)
+    assert to_canvas(parse_local(format_local(second), VAN, T)) == "2025-11-02T08:30:00Z"
+    assert not is_ambiguous_local(parse_local("2025-11-02 12:00", VAN, T))
+    assert not is_ambiguous_local(parse_local("2025-03-09 03:30", VAN, T))
+
+
+def test_non_string_input() -> None:
+    for bad in (None, 5):
+        with pytest.raises(ValidationError):
+            parse_local(bad, VAN, T)  # type: ignore[arg-type]
