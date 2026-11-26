@@ -415,7 +415,8 @@ go in git LFS (`.gitattributes`).
       indent: 1
       new_tab: true
       canvas_id: 1238
-    - quiz: {canvas_id: 4321}     # unmanaged Canvas object, referred to by ID
+    - quiz:                       # unmanaged Canvas object, referred to by ID
+        canvas_id: 4321
       canvas_id: 1239
 ```
 

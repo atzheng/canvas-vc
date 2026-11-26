@@ -1,0 +1,36 @@
+- canvas_id: 4433
+  name: Week 1 – Linear models
+  published: true
+  unlock: 2026-09-08 09:00
+  overrides:
+    - section: BA2
+      unlock: 2026-09-09 09:00
+  items:
+    - canvas_id: 1234
+      page: syllabus
+    - canvas_id: 1235
+      header: Lecture
+    - canvas_id: 1236
+      file: lectures/01-linear-models.pdf
+      title: Slides
+      indent: 1
+    - canvas_id: 1237
+      assignment: hw1
+    - canvas_id: 1238
+      url: https://scikit-learn.org/stable/modules/linear_model.html
+      title: sklearn docs
+      indent: 1
+      new_tab: true
+    - canvas_id: 1239
+      quiz:
+        canvas_id: 4321
+    - canvas_id: 1240
+      discussion:
+        canvas_id: 8765
+      published: false
+- canvas_id: 4434
+  name: Week 2
+- canvas_id: 4435
+  name: Week 2
+  items:
+    - header: Reading
