@@ -312,7 +312,8 @@ class LinkContext:
     from_path: str                                 # tree path of the document being rendered
     ids: Callable[[ObjectKey], int | str | None]   # tree path -> canvas id
     paths: Callable[[Kind, int | str], str | None] # canvas id -> tree path
-def to_canvas_url(rel: str, ctx: LinkContext) -> str | None
+    exists: Callable[[str], bool] | None = None    # tree path -> local object exists (id or not)
+def to_canvas_url(rel: str, ctx: LinkContext, *, image: bool = False) -> str | None
 def from_canvas_url(url: str, ctx: LinkContext) -> str | None
 ```
 
@@ -320,6 +321,18 @@ URL forms: page `/courses/{c}/pages/{slug}`, assignment
 `/courses/{c}/assignments/{id}`, announcement
 `/courses/{c}/discussion_topics/{id}`, file link
 `/courses/{c}/files/{id}?wrap=1`, image `/courses/{c}/files/{id}/preview`.
+`?query` and `#fragment` on a relative link are carried through.
+
+`render/md2html.py` also has `md_to_html_report(md, ctx) -> RenderResult(html,
+missing_links, unresolved_links)`. `missing_links`: no such local object (an
+error for `validate`/push). `unresolved_links`: the object exists locally but
+has no canvas_id yet (needs `ctx.exists`). Push renders again after creating
+new objects, so unresolved links get filled in. Links are also rewritten in
+raw HTML `<a href>` / `<img src>`.
+
+Pinned `pygments>=2.21,<2.22`: code blocks use inline styles, which feed the
+`.canvas/bodies.json` hashes, so changing the pygments version requires a body
+re-baseline (re-render and re-record all bodies).
 
 ```python
 # render/bodies.py   — .canvas/bodies.json: {tree_path: {"html_sha256": str, "md_sha256": str}}
