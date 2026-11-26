@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import warnings
 from datetime import datetime
 from pathlib import Path
 
@@ -228,7 +229,13 @@ def test_invalid_meta(cfg: CourseConfig, tmp_path: Path, text: str) -> None:
 
 
 def test_typespec_load_dump(cfg: CourseConfig, tmp_path: Path) -> None:
-    objs = {"files/a.pdf": FileEntry(canvas_id=1, path="a.pdf", sha256="aa")}
+    objs = {
+        "files/a.pdf": FileEntry(
+            canvas_id=1,
+            path="a.pdf",
+            sha256="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )
+    }
     write_files(tmp_path, FILE_SPEC.dump(objs, cfg))  # type: ignore[arg-type]
     assert FILE_SPEC.load(tmp_path, cfg) == objs
 
@@ -236,3 +243,148 @@ def test_typespec_load_dump(cfg: CourseConfig, tmp_path: Path) -> None:
 def test_dump_rejects_non_tree_key(cfg: CourseConfig) -> None:
     with pytest.raises(ValueError, match="tree path"):
         FILE_SPEC.dump_files_meta(FilesMeta(files={"a.pdf": FileEntry()}), cfg)
+
+
+def _load(cfg: CourseConfig, tmp_path: Path, text: str) -> FilesMeta:
+    write_files(tmp_path, {"files/_meta.yaml": text})
+    return FILE_SPEC.load_files_meta(tmp_path, cfg)
+
+
+HEX = "a" * 64
+
+
+@pytest.mark.parametrize(
+    ("text", "message"),
+    [
+        (
+            "files:\n  a.pdf: {canvas_id: 5}\n  b.pdf: {canvas_id: 5}\n",
+            r"files\.b\.pdf: duplicate canvas_id 5 \(also in a\.pdf\)",
+        ),
+        ("files:\n  a.pdf: {canvas_id: -1}\n", "canvas_id"),
+        ("files:\n  a.pdf: {sha256: ABC}\n", "sha256"),
+        (f"files:\n  a.pdf: {{sha256: {'A' * 64}}}\n", "sha256"),
+        (f"files:\n  a.pdf: {{sha256: {HEX}0}}\n", "sha256"),
+        ("files:\n  A.pdf: {}\n  a.pdf: {}\n", "case-insensitive"),
+        ('files:\n  "a\\\\b.pdf": {}\n', "invalid file path"),
+        ("files:\n  sub/_meta.yaml: {}\n", "invalid file path"),
+        ("files:\n  _meta.yaml: {}\n", "invalid file path"),
+        ("rules:\n  - match: '[z-a]'\n", r"rules\[0\]: match: invalid glob '\[z-a\]'"),
+        ("rules:\n  - match: ok\n  - match: '[a--b]'\n", r"rules\[1\]: match: invalid glob"),
+        ("defaults:\n  lock: true\n", "lock"),
+    ],
+)
+def test_more_invalid_meta(cfg: CourseConfig, tmp_path: Path, text: str, message: str) -> None:
+    with pytest.raises(ValidationError, match=message):
+        _load(cfg, tmp_path, text)
+
+
+def test_valid_sha_and_zero_id(cfg: CourseConfig, tmp_path: Path) -> None:
+    meta = _load(cfg, tmp_path, f"files:\n  a.pdf: {{canvas_id: 0, sha256: {HEX}}}\n")
+    assert meta.files["files/a.pdf"].sha256 == HEX
+
+
+@pytest.mark.parametrize(
+    ("pattern", "path", "expected"),
+    [
+        ("[]a]", "]", True),
+        ("[]a]", "a", True),
+        ("[]a]", "b", False),
+        ("[!]a]", "b", True),
+        ("[!]a]", "]", False),
+        ("[[a]", "[", True),
+        ("[[a]", "a", True),
+        ("[a&&b]", "&", True),
+        ("[a&&b]", "b", True),
+        ("[a-c]", "b", True),
+        ("[a-]", "-", True),
+        ("a[/]b", "a/b", False),
+    ],
+)
+def test_glob_class_edge_cases(pattern: str, path: str, expected: bool) -> None:
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert glob_match(pattern, path) is expected
+
+
+@pytest.mark.parametrize("pattern", ["[z-a]", "[a--b]"])
+def test_glob_invalid_raises_value_error(pattern: str) -> None:
+    with pytest.raises(ValueError, match="invalid glob"):
+        glob_match(pattern, "a")
+
+
+def test_no_date_overrides_rule(cfg: CourseConfig, tmp_path: Path) -> None:
+    lock = dt(cfg, 2026, 12, 20, 23, 59)
+    meta = FilesMeta(
+        rules=[FileRule(match="solutions/**", settings=FileSettings(lock=lock))],
+        files={
+            "files/solutions/a.pdf": FileEntry(path="solutions/a.pdf", lock=False),
+            "files/solutions/b.pdf": FileEntry(path="solutions/b.pdf"),
+        },
+    )
+    assert meta.effective("files/solutions/a.pdf").lock is None
+    assert meta.effective("files/solutions/b.pdf").lock == lock
+    text = FILE_SPEC.dump_files_meta(meta, cfg)["files/_meta.yaml"].decode()
+    assert "  solutions/a.pdf:\n    lock: false\n" in text
+    assert text.count("false") == 1
+    assert_files_meta_fixed_point(FILE_SPEC, meta, cfg, tmp_path)  # type: ignore[arg-type]
+    (tmp_path / "x").mkdir()
+    loaded = _load(cfg, tmp_path / "x", text)
+    assert loaded.files["files/solutions/a.pdf"].lock is False
+
+
+def test_no_date_in_rules_and_defaults(cfg: CourseConfig, tmp_path: Path) -> None:
+    unlock = dt(cfg, 2026, 9, 1, 9)
+    meta = FilesMeta(
+        defaults=FileSettings(unlock=unlock),
+        rules=[FileRule(match="early/**", settings=FileSettings(unlock=False))],
+        files={"files/early/x.pdf": FileEntry(path="early/x.pdf", unlock=unlock)},
+    )
+    assert meta.effective("files/other.pdf").unlock == unlock
+    assert meta.effective("files/early/y.pdf").unlock is None
+    assert meta.effective("files/early/x.pdf").unlock == unlock  # entry re-sets a date
+    assert_files_meta_fixed_point(FILE_SPEC, meta, cfg, tmp_path)  # type: ignore[arg-type]
+
+
+def test_no_date_without_rule_is_not_written(cfg: CourseConfig) -> None:
+    meta = FilesMeta(files={"files/a.pdf": FileEntry(path="a.pdf", canvas_id=1, lock=False)})
+    assert "false" not in FILE_SPEC.dump_files_meta(meta, cfg)["files/_meta.yaml"].decode()
+
+
+def test_effective_requires_prefix() -> None:
+    with pytest.raises(ValueError, match="tree path"):
+        FilesMeta().effective("a.pdf")
+
+
+def test_nfc_normalization(cfg: CourseConfig, tmp_path: Path) -> None:
+    nfd = "résumé.pdf"
+    nfc = "résumé.pdf"
+    assert glob_match(nfc, nfd) and glob_match(nfd, nfc)
+    meta = _load(
+        cfg,
+        tmp_path,
+        f'rules:\n  - match: "{nfc}"\n    hidden: true\nfiles:\n  "{nfd}": {{canvas_id: 4}}\n',
+    )
+    assert list(meta.files) == [f"files/{nfc}"]
+    assert meta.effective(f"files/{nfd}").hidden is True
+    assert meta.files[f"files/{nfc}"].path == nfc
+    (tmp_path / "y").mkdir()
+    assert_files_meta_fixed_point(FILE_SPEC, meta, cfg, tmp_path / "y")  # type: ignore[arg-type]
+
+
+def test_nfc_collision_is_duplicate(cfg: CourseConfig, tmp_path: Path) -> None:
+    with pytest.raises(ValidationError, match="collides"):
+        _load(cfg, tmp_path, 'files:\n  "ré.pdf": {}\n  "ré.pdf": {}\n')
+
+
+def test_redundant_setting_not_written_so_rule_edit_applies(cfg: CourseConfig) -> None:
+    old = FilesMeta(
+        rules=[FileRule(match="*.pdf", settings=FileSettings(hidden=True))],
+        files={"files/a.pdf": FileEntry(path="a.pdf", canvas_id=1, hidden=True)},
+    )
+    text = FILE_SPEC.dump_files_meta(old, cfg)["files/_meta.yaml"].decode()
+    assert text.count("hidden") == 1  # only the rule, not the entry
+    new = FilesMeta(
+        rules=[FileRule(match="*.pdf", settings=FileSettings(hidden=False))],
+        files={"files/a.pdf": FileEntry(path="a.pdf", canvas_id=1)},
+    )
+    assert new.effective("files/a.pdf").hidden is False

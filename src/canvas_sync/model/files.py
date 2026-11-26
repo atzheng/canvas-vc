@@ -19,10 +19,11 @@ are documented on ``glob_match``.
 from __future__ import annotations
 
 import re
+import unicodedata
 from datetime import time
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from pydantic import BaseModel, ConfigDict
 
@@ -35,6 +36,7 @@ from canvas_sync.model.serialize import dump_yaml, load_yaml
 META_PATH = "files/_meta.yaml"
 _PREFIX = "files/"
 _SETTING_FIELDS = ("published", "hidden", "unlock", "lock")
+_DATE_FIELDS = ("unlock", "lock")
 
 # One order for every mapping in the document (top level, rules, entries).
 KEY_ORDER = [
@@ -50,8 +52,14 @@ KEY_ORDER = [
     "lock",
     "stable_link",
 ]
+_SHA256 = re.compile(r"[0-9a-f]{64}")
 _TOP_KEYS = frozenset({"defaults", "rules", "files"})
 _ENTRY_KEYS = frozenset({"canvas_id", "sha256", "stable_link", *_SETTING_FIELDS})
+
+
+# Date setting: a datetime, None = inherit from the layer below, False = explicitly
+# "no date" (overrides earlier layers; ``effective`` turns it into None).
+DateSetting = LocalDT | Literal[False] | None
 
 
 class FileEntry(CanvasObject):
@@ -62,8 +70,8 @@ class FileEntry(CanvasObject):
     sha256: str = ""
     published: bool | None = None
     hidden: bool | None = None
-    unlock: LocalDT | None = None
-    lock: LocalDT | None = None
+    unlock: DateSetting = None
+    lock: DateSetting = None
     stable_link: bool = False
 
 
@@ -73,8 +81,8 @@ class FileSettings(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
     published: bool | None = None
     hidden: bool | None = None
-    unlock: LocalDT | None = None
-    lock: LocalDT | None = None
+    unlock: DateSetting = None
+    lock: DateSetting = None
 
 
 class FileRule(BaseModel):
@@ -83,15 +91,44 @@ class FileRule(BaseModel):
     settings: FileSettings = FileSettings()
 
 
+def _resolve(s: FileSettings) -> FileSettings:
+    """Turn the explicit "no date" (False) into None."""
+    return s.model_copy(update={f: None for f in _DATE_FIELDS if getattr(s, f) is False})
+
+
 def _overlay(base: FileSettings, over: FileSettings | FileEntry) -> FileSettings:
     """``base`` with every non-None setting of ``over`` applied."""
     update = {f: getattr(over, f) for f in _SETTING_FIELDS if getattr(over, f) is not None}
     return base.model_copy(update=update)
 
 
+def _nfc(s: str) -> str:
+    """Unicode NFC, so macOS (NFD) file names match patterns and keys."""
+    return unicodedata.normalize("NFC", s)
+
+
 # ---------------------------------------------------------------------------
 # Glob matching
 # ---------------------------------------------------------------------------
+
+
+def _class_body(body: str) -> str:
+    """Regex class body for glob ``[..]`` members: every character escaped, ranges
+    validated (``re.error`` for ``z-a`` or ``a--b``)."""
+    out: list[str] = []
+    i = 0
+    while i < len(body):
+        c = body[i]
+        if i + 2 < len(body) and body[i + 1] == "-":
+            hi = body[i + 2]
+            if hi < c:
+                raise re.error(f"bad character range {c}-{hi}")
+            out.append(f"{re.escape(c)}-{re.escape(hi)}")
+            i += 3
+        else:
+            out.append(re.escape(c))
+            i += 1
+    return "".join(out)
 
 
 def _translate(pattern: str) -> str:
@@ -118,18 +155,15 @@ def _translate(pattern: str) -> str:
             out.append("[^/]")
             i += 1
         elif c == "[":
-            start = i + 2 if pattern[i + 1 : i + 2] in ("!", "^") else i + 1
-            end = pattern.find("]", start)
+            neg = pattern[i + 1 : i + 2] in ("!", "^")
+            first = i + 2 if neg else i + 1  # a ']' right after '[' / '[!' is a member
+            end = pattern.find("]", first + 1)
             if end == -1:
                 out.append(re.escape(c))
                 i += 1
             else:
-                body = pattern[i + 1 : end]
-                neg = body[:1] in ("!", "^")
-                if neg:
-                    body = body[1:]
-                body = body.replace("\\", "\\\\")
-                out.append(f"[{'^/' if neg else ''}{body}]")
+                body = _class_body(pattern[first:end])
+                out.append(f"[^/{body}]" if neg else f"(?!/)[{body}]")
                 i = end + 1
         elif c == "\\" and i + 1 < n:
             out.append(re.escape(pattern[i + 1]))
@@ -148,7 +182,11 @@ def _compile(pattern: str) -> tuple[re.Pattern[str], bool, bool]:
         pattern = pattern.rstrip("/")
     anchored = "/" in pattern
     pattern = pattern.lstrip("/")
-    return re.compile(_translate(pattern) + r"\Z", re.DOTALL), anchored, dir_only
+    try:
+        regex = re.compile(_translate(pattern) + r"\Z", re.DOTALL)
+    except re.error as e:
+        raise ValueError(f"invalid glob {pattern!r}: {e}") from None
+    return regex, anchored, dir_only
 
 
 def glob_match(pattern: str, rel_path: str) -> bool:
@@ -170,8 +208,8 @@ def glob_match(pattern: str, rel_path: str) -> bool:
       ``old`` and ``old/`` both select ``old/a/b.pdf``. A trailing ``/``
       requires a directory (it never selects a file named like that).
     """
-    regex, anchored, dir_only = _compile(pattern)
-    parts = rel_path.split("/")
+    regex, anchored, dir_only = _compile(_nfc(pattern))
+    parts = _nfc(rel_path).split("/")
     last = len(parts) - 1
     for i, part in enumerate(parts):
         if dir_only and i == last:
@@ -197,22 +235,31 @@ class FilesMeta(BaseModel):
     rules: list[FileRule] = []
     files: dict[str, FileEntry] = {}
 
-    def rule_settings(self, path: str) -> FileSettings:
-        """Defaults, then every matching rule in order; not the per-file entry."""
-        rel = path.removeprefix(_PREFIX)
+    def _rule_layers(self, path: str) -> FileSettings:
+        """Defaults and matching rules layered, False dates kept (internal)."""
+        if not path.startswith(_PREFIX):
+            raise ValueError(f"{path!r} is not a tree path under {_PREFIX}")
+        rel = _nfc(path).removeprefix(_PREFIX)
         s = self.defaults
         for rule in self.rules:
             if glob_match(rule.match, rel):
                 s = _overlay(s, rule.settings)
         return s
 
+    def rule_settings(self, path: str) -> FileSettings:
+        """Defaults, then every matching rule in order; not the per-file entry."""
+        return _resolve(self._rule_layers(path))
+
     def effective(self, path: str) -> FileSettings:
-        """Settings of the file at tree path ``path`` (``files/a/b.pdf``): defaults,
-        then matching rules in order (later wins), then its per-file entry.
-        A None in a later layer does not clear an earlier value."""
-        s = self.rule_settings(path)
-        entry = self.files.get(path)
-        return _overlay(s, entry) if entry is not None else s
+        """Settings of the file at tree path ``path`` (``files/a/b.pdf``; ValueError
+        without the ``files/`` prefix): defaults, then matching rules in order
+        (later wins), then its per-file entry. A None in a later layer inherits;
+        ``False`` for ``unlock``/``lock`` clears an earlier date and comes back as None."""
+        s = self._rule_layers(path)
+        entry = self.files.get(_nfc(path))
+        if entry is None:
+            entry = self.files.get(path)
+        return _resolve(_overlay(s, entry) if entry is not None else s)
 
 
 # ---------------------------------------------------------------------------
@@ -256,9 +303,11 @@ def _settings(m: dict[str, Any], cfg: CourseConfig, where: str) -> FileSettings:
     }
     for f, default in times.items():
         v = m.get(f)
-        if v is None:
-            values[f] = None
+        if v is None or v is False:
+            values[f] = v
             continue
+        if v is True:
+            raise _fail(f"{where}: {f} must be a date or false")
         try:
             values[f] = parse_local(v, cfg.tz, default)
         except ValidationError as e:
@@ -268,7 +317,13 @@ def _settings(m: dict[str, Any], cfg: CourseConfig, where: str) -> FileSettings:
 
 def _check_rel_path(p: str) -> None:
     parts = p.split("/")
-    if not p or p.startswith("/") or any(x in ("", ".", "..") for x in parts) or p == "_meta.yaml":
+    if (
+        not p
+        or p.startswith("/")
+        or "\\" in p
+        or any(x in ("", ".", "..") for x in parts)
+        or "_meta.yaml" in parts
+    ):
         raise _fail(f"files: invalid file path {p!r}")
 
 
@@ -276,11 +331,11 @@ def _entry(rel: str, m: dict[str, Any], cfg: CourseConfig) -> FileEntry:
     where = f"files.{rel}"
     _check_keys(m, _ENTRY_KEYS, where)
     cid = m.get("canvas_id")
-    if cid is not None and (isinstance(cid, bool) or not isinstance(cid, int)):
-        raise _fail(f"{where}: canvas_id must be an integer")
+    if cid is not None and (isinstance(cid, bool) or not isinstance(cid, int) or cid < 0):
+        raise _fail(f"{where}: canvas_id must be a non-negative integer")
     sha = m.get("sha256")
-    if sha is not None and not isinstance(sha, str):
-        raise _fail(f"{where}: sha256 must be a string")
+    if sha is not None and not (isinstance(sha, str) and _SHA256.fullmatch(sha)):
+        raise _fail(f"{where}: sha256 must be 64 lowercase hex characters")
     link = m.get("stable_link")
     if link is not None and not isinstance(link, bool):
         raise _fail(f"{where}: stable_link must be true or false")
@@ -312,11 +367,27 @@ def parse_files_meta(text: str, cfg: CourseConfig) -> FilesMeta:
         match = m.get("match")
         if not isinstance(match, str) or not match.strip():
             raise _fail(f"{where}: match must be a non-empty string")
+        try:
+            _compile(_nfc(match))
+        except ValueError:
+            raise _fail(f"{where}: match: invalid glob {match!r}") from None
         rules.append(FileRule(match=match, settings=_settings(m, cfg, where)))
     files: dict[str, FileEntry] = {}
-    for rel, v in _mapping(top.get("files"), "files").items():
-        _check_rel_path(rel)
-        files[_PREFIX + rel] = _entry(rel, _mapping(v, f"files.{rel}"), cfg)
+    folded: dict[str, str] = {}
+    ids: dict[int, str] = {}
+    for raw_rel, v in _mapping(top.get("files"), "files").items():
+        _check_rel_path(raw_rel)
+        rel = _nfc(raw_rel)
+        if rel.casefold() in folded:
+            raise _fail(f"files.{rel}: collides with {folded[rel.casefold()]} (case-insensitive)")
+        folded[rel.casefold()] = rel
+        entry = _entry(rel, _mapping(v, f"files.{rel}"), cfg)
+        if entry.canvas_id is not None:
+            cid = int(entry.canvas_id)
+            if cid in ids:
+                raise _fail(f"files.{rel}: duplicate canvas_id {cid} (also in {ids[cid]})")
+            ids[cid] = rel
+        files[_PREFIX + rel] = entry
     return FilesMeta(defaults=defaults, rules=rules, files=files)
 
 
@@ -339,7 +410,10 @@ def _entry_data(meta: FilesMeta, tree_path: str, e: FileEntry) -> dict[str, Any]
         data["sha256"] = e.sha256
     for f in _SETTING_FIELDS:
         v = getattr(e, f)
-        if v is not None and v != getattr(base, f):
+        if v is None:
+            continue
+        # compare what the entry resolves to; False ("no date") only matters over a rule date
+        if (None if f in _DATE_FIELDS and v is False else v) != getattr(base, f):
             data[f] = v
     if e.stable_link:
         data["stable_link"] = True
@@ -359,7 +433,7 @@ def render_files_meta(meta: FilesMeta) -> str:
         for tree_path in sorted(meta.files):
             if not tree_path.startswith(_PREFIX):
                 raise ValueError(f"file entry key {tree_path!r} is not a tree path under files/")
-            files[tree_path.removeprefix(_PREFIX)] = _entry_data(
+            files[_nfc(tree_path).removeprefix(_PREFIX)] = _entry_data(
                 meta, tree_path, meta.files[tree_path]
             )
         doc["files"] = files
