@@ -161,6 +161,10 @@ REGISTRY: dict[Kind, TypeSpec]
 ```
 
 `load` returns objects keyed by tree path, in on-Canvas order for modules.
+A `load` must raise `ValidationError` (one line, naming both paths) when two objects
+of its type carry the same `canvas_id`. Folder-per-type loads (pages, announcements)
+also raise for any non-hidden entry that is not a top-level `*.md` file, so a moved
+file can never look like a deletion.
 `dump` returns `{tree path: exact bytes}` for the files the type owns, must not
 depend on dict order of its input, and must satisfy
 `dump(load(dump(objs))) == dump(objs)`; `tests/helpers/fixed_point.py`
@@ -206,7 +210,7 @@ Per-type fields (frontmatter key = field name unless noted; all dates `LocalDT |
 - `Page`: `title, published, publish_at, front_page: bool = False, body_format: Literal["md","html"] = "md", body`
 - `Announcement`: `title, post_at, published: bool = True, body_format, body`
 - `Assignment`: `title, points: float | None, group: str | None, submission_types, allowed_extensions: list[str] = [], grading_type: str = "points", omit_from_final_grade = False, published, unlock, due, lock, assign_to_overrides_only = False, overrides: list[Override] = [], body_format, body`
-- `Override` (`model/overrides.py`): exactly one of `section: str`, `group: str`, `students: list[str]` (sorted), plus `title: str | None, unlock, due, lock`. Canonical order: sections by name, then groups by name, then student sets by first student.
+- `Override` (`model/overrides.py`): exactly one of `section: str`, `group: str`, `students: list[str]` (sorted), plus `title: str | None, unlock, due, lock`. Canonical order: sections by name, then groups by name, then student sets by first student. Overrides have no `canvas_id` in files, so readers and differs match existing Canvas overrides by target (section, group or student set). A section or group appears at most once, and a student in at most one student-set override.
 - `FileEntry` (`model/files.py`): `path, canvas_id, sha256, published, hidden, unlock, lock, stable_link = False`. `FilesMeta` holds `defaults`, `rules: list[FileRule]` and `files: dict[path, FileEntry]` (only ids, hashes and settings that differ from what the rules give). `effective(path) -> FileSettings` applies defaults, then rules, then the per-file entry.
 - `Module` (`model/modules.py`): `name, canvas_id, published, unlock, overrides: list[Override] (unlock only), items: list[ModuleItem]`. `ModuleItem`: exactly one of `page | assignment | file | header | url | quiz | discussion` (the last two are `{canvas_id: int}`, for unmanaged objects), plus `title, indent: int = 0, new_tab = False, published: bool | None, canvas_id`.
 - `Roster` (`model/roster.py`): `sections: list[str], groups_category: str | None`. `RosterCache` (untracked): `students: dict[ref, canvas_user_id]`, `sections: dict[name, id]`, `groups: dict[name, id]`.
@@ -308,7 +312,8 @@ class LinkContext:
     from_path: str                                 # tree path of the document being rendered
     ids: Callable[[ObjectKey], int | str | None]   # tree path -> canvas id
     paths: Callable[[Kind, int | str], str | None] # canvas id -> tree path
-def to_canvas_url(rel: str, ctx: LinkContext) -> str | None
+    exists: Callable[[str], bool] | None = None    # tree path -> local object exists (id or not)
+def to_canvas_url(rel: str, ctx: LinkContext, *, image: bool = False) -> str | None
 def from_canvas_url(url: str, ctx: LinkContext) -> str | None
 ```
 
@@ -316,6 +321,18 @@ URL forms: page `/courses/{c}/pages/{slug}`, assignment
 `/courses/{c}/assignments/{id}`, announcement
 `/courses/{c}/discussion_topics/{id}`, file link
 `/courses/{c}/files/{id}?wrap=1`, image `/courses/{c}/files/{id}/preview`.
+`?query` and `#fragment` on a relative link are carried through.
+
+`render/md2html.py` also has `md_to_html_report(md, ctx) -> RenderResult(html,
+missing_links, unresolved_links)`. `missing_links`: no such local object (an
+error for `validate`/push). `unresolved_links`: the object exists locally but
+has no canvas_id yet (needs `ctx.exists`). Push renders again after creating
+new objects, so unresolved links get filled in. Links are also rewritten in
+raw HTML `<a href>` / `<img src>`.
+
+Pinned `pygments>=2.21,<2.22`: code blocks use inline styles, which feed the
+`.canvas/bodies.json` hashes, so changing the pygments version requires a body
+re-baseline (re-render and re-record all bodies).
 
 ```python
 # render/bodies.py   — .canvas/bodies.json: {tree_path: {"html_sha256": str, "md_sha256": str}}
@@ -522,11 +539,43 @@ class ApplyResult:
     error: Exception | None
     new_ids: dict[ObjectKey, int | str]        # to write back into the tree
 
-def apply(plan: Plan, client: CanvasClient, ctx: ApplyContext, *, confirmed: set[str]) -> ApplyResult
+def apply(plan: Plan, client: CanvasClient, ctx: ApplyContext, *, confirmed: set[str],
+          writers: Mapping[Kind, Writer] | None = None) -> ApplyResult
 ```
 
-`apply` stops at the first failure and returns what it did so far. It never
-retries a write that isn't idempotent.
+`apply` stops at the first failure and returns what it did so far (`done`,
+`failed`, `error`, and `new_ids` of objects already created; `ctx.ids` is
+filled as creates happen). It never retries a write. Before the first write it
+raises `GuardBlocked` if any `Risk.needs_confirm` flag is not in `confirmed`
+(the bare flag, or `"<flag> <tree path>"` for a single object; see
+`plan.core.unconfirmed_risks`). Assignment operations also go through
+`ctx.guard.assert_allowed` **twice**: a pre-flight pass over every guarded
+operation before the first write (a refusal raises `GuardBlocked` with nothing
+written), then again immediately before each guarded write, for live state.
+`assert_allowed` must therefore be idempotent. An operation is guarded
+(`apply.needs_guard`) if its key kind is ASSIGNMENT, or if `Operation.touches_assignment`
+is set; module differs set it on ops that change `published` on, or add or
+remove, an item whose content is an assignment. A `GuardBlocked` in the
+just-in-time pass is returned in `ApplyResult.error` (with `done`/`failed`), not
+raised; the push CLI must report it as a stop, not a crash.
+
+**Plug-in interface.** Type beads edit only their own files:
+- differs: `plan/<type>.py` `diff_type(base, target)`, listed in
+  `plan.core.DIFFER_MODULES` (apply order); `core.diff` moves every DELETE to
+  the end in reverse order and drops operations under `.canvas/`;
+  `plan.core.changes_between(before, after)` helps build `Operation.changes`.
+- writers: `remote/<type>.py` (`create`/`update`/`delete`, section 8), found by
+  `op.key.kind` via `apply.WRITER_MODULES`. CREATE and UPLOAD-without-`before`
+  call `create(after)`; UPDATE, UNPUBLISH, REORDER and UPLOAD-with-`before` call
+  `update(before, after)`; DELETE calls `delete(before)`.
+- Differs must emit a same-key replacement (a page rename that keeps its
+  slug, a file replaced at the same path) as UPDATE or UPLOAD-with-`before`,
+  never as DELETE + CREATE, because deletes run last.
+- A cleared value is `(old, None)` in `Operation.changes`; the writer sends an
+  explicit null for it.
+- Modules are matched by `canvas_id` first, then by `modules.yaml#<name>` key
+  (keys of repeated names are positional); that is the modules differ's job,
+  core does not care how an operation's key was chosen.
 
 ```python
 # errors.py
