@@ -44,7 +44,9 @@ src/canvas_sync/
   snapshot.py                  Course -> commit on canvas/main            (§11)
   ignore.py                    .canvasignore matching                     (§11)
 tests/
-  fake_canvas.py               FakeCanvas (§12): used by every test touching remote/
+  fake_canvas/                 FakeCanvas (§12): used by every test touching remote/
+    __init__.py core.py        transport, routing, pagination, request log, course/sections/users/groups
+    pages.py discussion_topics.py assignments.py files.py modules.py   one module per resource
   fixtures/                    sample course trees, Canvas JSON payloads
   test_*.py
   integration/                 opt-in, real sandbox course (§12)
@@ -69,7 +71,7 @@ format --check && uv run pyright`.
 course.yaml  modules.yaml  roster.yaml  .canvasignore
 pages/<slug>.md  assignments/<slug>.md  announcements/<slug>.md
 files/_meta.yaml  files/**
-.canvas/bodies.json            tracked
+.canvas/bodies.json            written only into snapshots by fetch; ignored by plan and validate
 .canvas/roster-cache.json      gitignored
 ```
 
@@ -147,6 +149,13 @@ class TypeSpec(Protocol):               # one per type, registered in model/__in
 REGISTRY: dict[Kind, TypeSpec]
 ```
 
+`model/__init__.py` registers **all five** TypeSpecs from the start (F3
+creates them as stubs that load and dump nothing). Type beads fill in their
+own module and never edit `model/__init__.py` or `course.py`. TypeSpecs whose
+storage isn't "one file per object" (files: `files/_meta.yaml` + blobs;
+modules: `modules.yaml`) still implement `load`/`dump`, with `load`
+returning objects keyed by the paths in §4 (`modules.yaml#<name>`).
+
 Body-bearing objects (`Page`, `Assignment`, `Announcement`) have a
 `body: str` field holding **Markdown** (or HTML when `body_format: html`), with
 relative links (§6).
@@ -178,8 +187,9 @@ def dump_tree(course: Course) -> dict[str, bytes]    # path -> exact file conten
 **Invariants (tested):**
 - `dump_tree(load_tree(dump_tree(c))) == dump_tree(c)` (canonical form is a
   fixed point).
-- `load_tree` is tolerant (date-only values, any key order). `dump_tree` is
-  strict and canonical.
+- `load_tree` is tolerant (date-only values, any key order, CRLF line
+  endings, a missing trailing newline). `dump_tree` is strict and canonical
+  (LF, UTF-8, no BOM).
 - Binary file contents are not held in `Course`. `dump_tree` emits only text
   files. Snapshot and apply handle blobs by `sha256` (§11).
 
@@ -284,6 +294,7 @@ The initial list (paths relative to `/api/v1`, `{c}` = course id):
 ```
 GET    /courses/{c}  /courses/{c}/(pages|assignments|assignment_groups|discussion_topics|
        files|folders|modules|sections|groups|group_categories|users|enrollments)(/.*)?
+       /courses/{c}/late_policy
 GET    /folders/\d+(/.*)?  /files/\d+  /users/self
 POST   /courses/{c}/pages  /courses/{c}/assignments  /courses/{c}/assignment_groups
        /courses/{c}/discussion_topics  /courses/{c}/modules  /courses/{c}/modules/\d+/items
@@ -294,12 +305,19 @@ PUT    /courses/{c}/pages/[^/]+  /courses/{c}/assignments/\d+  /courses/{c}/assi
        /files/\d+  /courses/{c}/modules/\d+/assignment_overrides (if module overrides are supported)
 DELETE /courses/{c}/pages/[^/]+  /courses/{c}/assignments/\d+  /courses/{c}/assignments/\d+/overrides/\d+
        /courses/{c}/modules/\d+  /courses/{c}/modules/\d+/items/\d+  /files/\d+
-DELETE /courses/{c}/assignment_groups/\d+   only with params containing move_assignments_to
 ```
+
+Assignment groups are created, never deleted, so no group `DELETE` is allowed.
+
+**Course lock.** `CanvasClient` is constructed for one `course_id`, and
+`{c}` in the allowlist matches only that id, so a client can't touch another
+course. Integration tests and experiments also refuse to construct a write
+client unless `course_id == CANVAS_SANDBOX_COURSE`.
 
 Never allowed in any mode: any write under `.../submissions`, any
 `DELETE /courses/{c}` (deleting or concluding the course),
 `.../discussion_topics/\d+` DELETE (announcements are never deleted),
+`.../assignment_groups/\d+` DELETE,
 quizzes, enrollments writes. `tests/test_allowlist.py` contains a list of
 forbidden calls that must stay forbidden.
 
@@ -359,6 +377,7 @@ class RiskKind(StrEnum):
     HAS_SUBMISSIONS="has_submissions"; GRADING_CHANGE="grading_change"
     LATE_POLICY_REGRADE="late_policy_regrade"; ACCESS_REMOVED="access_removed"
     POSTED_ANNOUNCEMENT="posted_announcement"; FILE_ID_CHANGE="file_id_change"
+    NOTIFIES_STUDENTS="notifies_students"   # announcement posted now: needs --confirm-notify
 
 @dataclass(frozen=True)
 class Risk:
@@ -431,10 +450,10 @@ Hard rules, which `confirmed` can't override:
 - `DELETE` on an assignment with any submission → `GuardBlocked`. The differ
   has already turned it into UNPUBLISH + add to `.canvasignore`.
 - Changing `group_category` with submissions → `GuardBlocked`.
-- Deleting an assignment group without `move_assignments_to` → `GuardBlocked`.
+- Any assignment group deletion → `GuardBlocked` (also not in the allowlist).
 
 Rules that need confirmation: `GRADING_CHANGE` (points, grading_type),
-`LATE_POLICY_REGRADE`, `ACCESS_REMOVED`.
+`LATE_POLICY_REGRADE`, `ACCESS_REMOVED`, `NOTIFIES_STUDENTS`.
 
 ```python
 # remote/backup.py
@@ -464,14 +483,17 @@ def is_clean(root) -> bool
 def read_tree_files(root, commit: str) -> dict[str, bytes]   # for loading canvas/main or HEAD
 def load_course_at(root, commit: str) -> Course             # load_tree over a commit's files
 def merge(root, ref=REMOTE_REF, rebase=False) -> int        # runs git merge/rebase in the work tree; returns exit code
-def commit_paths(root, paths, message) -> str               # used for id write-back
+def fast_forward(root, ref=REMOTE_REF) -> bool             # git merge --ff-only; False if not possible
 ```
 
 ```python
 # snapshot.py
-def snapshot(root: Path, course: Course, blobs: BlobStore, message: str) -> str | None
-    # dump_tree + blobs -> tree; if tree == tree of current canvas/main, return None;
-    # else commit with parent = current canvas/main and update_ref (compare-and-swap)
+def snapshot(root: Path, course: Course, bodies: Bodies, blobs: BlobStore, message: str,
+             extra_parent: str | None = None) -> str | None
+    # dump_tree + bodies.dump() at .canvas/bodies.json + blobs -> tree;
+    # if tree == tree of current canvas/main and extra_parent is None, return None;
+    # else commit with parents [current canvas/main, extra_parent?] and update_ref (compare-and-swap).
+    # push passes extra_parent=HEAD so canvas/main descends from the pushed commit.
 ```
 
 `BlobStore` (in `snapshot.py`): `put(content) -> sha256`, `get(sha256) ->
@@ -489,12 +511,14 @@ class IgnoreRules:
 ```
 
 Commit messages on `canvas/main`: `canvas fetch: <n> changed` or
-`canvas fetch after push`. The ID write-back commit on the user's branch:
-`canvas: record ids after push`.
+`canvas push: <n> operations`. After a push the user's branch is fast-forwarded
+to `canvas/main`. There's no separate write-back commit.
+
+`plan.diff` and `validate` ignore every path under `.canvas/`.
 
 ## 12. Testing
 
-- `tests/fake_canvas.py`: `FakeCanvas(httpx.BaseTransport)` keeps courses,
+- `tests/fake_canvas/`: `FakeCanvas(httpx.BaseTransport)` keeps courses,
   pages, assignments (with `submissions` you can seed), overrides,
   discussion topics, files and folders (with the replacement-chain behaviour
   from SPEC.md, configurable), modules and items, sections, groups and users
@@ -502,9 +526,11 @@ Commit messages on `canvas/main`: `canvas fetch: <n> changed` or
   (fixtures in `tests/fixtures/canvas/`), pagination via `Link` headers, and
   HTML sanitizing that is stable but not the identity (so the round-trip code
   is exercised). It records every request in `fake.log`.
-- Every reader/writer bead adds the endpoints it needs to `FakeCanvas`, in
-  a clearly separated section of the file per type, to keep merge conflicts
-  small.
+- Each resource lives in its own module (`tests/fake_canvas/<resource>.py`),
+  registered by `core.py` from the start. Reader beads add GET behaviour,
+  and writer beads add POST/PUT/DELETE behaviour in that module only.
+- Writes the fake receives for endpoints outside §7 fail the test, which
+  mirrors the allowlist.
 - `tests/integration/` runs only with `CANVAS_SANDBOX_URL`,
   `CANVAS_SANDBOX_COURSE`, `CANVAS_TOKEN` set (pytest marker `integration`,
   skipped by default). The safety suite seeds a test student's submissions

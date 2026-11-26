@@ -96,11 +96,15 @@ Then it:
 2. prints it and asks for confirmation (unless `--yes`)
 3. applies the operations in dependency order (files → pages/assignments →
    overrides → announcements → modules → module items)
-4. runs `fetch` again, so `canvas/main` records what Canvas actually stored
-   (after Canvas's HTML sanitizing, assigned IDs, etc.)
-5. checks that `git diff canvas/main HEAD` now contains only expected
-   differences (new IDs written back). The tool commits those write-backs as
-   `canvas: record ids after push`, so a second `push` is a no-op.
+4. runs `fetch` again and records the result as a snapshot commit whose
+   parents are **both** the previous `canvas/main` and `HEAD`. Its tree is
+   what Canvas actually stored: your content plus the newly assigned IDs.
+   Because `HEAD` is a parent, `canvas/main` is now a descendant of your
+   branch, just like a remote branch after `git push`.
+5. fast-forwards your branch to `canvas/main` (`git merge --ff-only`), which
+   brings in the new IDs. If the snapshot differs from `HEAD` in anything other
+   than IDs and `.canvas/` metadata, push reports it as a bug and leaves the
+   fast-forward to you. A second `push` is a no-op.
 
 If the apply fails partway, nothing is lost. The next `fetch` records the
 partial state, and `pull` + `push` finishes the job.
@@ -146,7 +150,9 @@ tree. Otherwise every fetch creates false conflicts. Rules:
   form. `validate --fix` normalizes local files to it.)
 - **Body round-tripping.** Canvas stores HTML. We edit Markdown.
   - On push, the tool records `sha256(HTML as Canvas returned it)` next to the
-    Markdown that produced it (`.canvas/bodies.json`, tracked).
+    Markdown that produced it, in `.canvas/bodies.json`. That file is written
+    **only into snapshots** (fetch), never by hand, and reaches your branch
+    through merges. Plans and `validate` ignore `.canvas/`.
   - On fetch, if the remote HTML hash matches the recorded one, the snapshot
     contains the **original Markdown**, unchanged. This is the common case and
     gives clean merges.
@@ -175,8 +181,8 @@ title: Homework 1
 ...
 ```
 
-- New local objects have no `canvas_id`. Push creates them and commits the ID
-  back (see Push step 5).
+- New local objects have no `canvas_id`. Push creates them, and the IDs
+  arrive on your branch through the post-push fast-forward (Push step 5).
 - **Renames are free**: `git mv assignments/hw1.md assignments/homework-1.md`
   keeps `canvas_id`, so the Canvas object (and its URL) is kept.
 - Deleting a file means deleting that Canvas object (subject to the deletion
@@ -184,8 +190,8 @@ title: Homework 1
 - Files and modules can't carry frontmatter. Their IDs live in
   `files/_meta.yaml` (per path) and `modules.yaml` (per module and per item).
 - Nothing is in a hidden state file that could get out of sync with git
-  except `.canvas/bodies.json` (tracked and regenerable) and the roster cache
-  (untracked).
+  except `.canvas/bodies.json` (written only by fetch, regenerable) and the
+  roster cache (untracked).
 
 ## Repository layout
 
@@ -201,7 +207,7 @@ course/
     _meta.yaml
     lectures/01-linear-models.pdf
   .canvas/
-    bodies.json             # tracked: Markdown↔HTML hashes for round-tripping
+    bodies.json             # written by fetch only: Markdown↔HTML hashes for round-tripping
     roster-cache.json       # UNTRACKED (.gitignore): Canvas user IDs ↔ names
   .canvasignore             # paths/objects on Canvas to leave out of the snapshot
   .gitattributes            # e.g. LFS for files/**
@@ -462,7 +468,8 @@ code by four independent layers, not left to good intentions.
 | action | effect on Canvas | tool behaviour |
 |---|---|---|
 | Delete an assignment | the assignment and its submissions are soft-deleted (restorable from `/courses/:id/undelete`, but treat as destructive) | **blocked** if any submission exists |
-| Delete an assignment group | **deletes every assignment in it** unless `move_assignments_to` is given | always sent with `move_assignments_to`; blocked if the group has assignments with submissions and no destination |
+| Delete an assignment group | **deletes every assignment in it** unless `move_assignments_to` is given | **never done**: the tool creates missing groups but never deletes one. Delete empty groups in the UI |
+| Create or publish an announcement with no future `post_at` | posts at once and **emails students** | not a submission risk, but flagged in the plan and needs confirmation, because it can't be taken back |
 | Change `group_category` (group vs. individual assignment) | changes who owns submissions | **blocked** once submissions exist (Canvas also refuses) |
 | Change `grading_type` or `points` | existing scores are reinterpreted or rescaled | allowed only with `--confirm-grading-change hw1`. The plan shows how many graded submissions are affected |
 | Change due dates/overrides when a late policy is on | Canvas recalculates late penalties, which **changes existing grades** | warned in plan with a count of affected graded submissions. Needs `--confirm-grading-change` |
@@ -523,7 +530,7 @@ and is unchanged.
     touching the working tree)
   - `plan.py`: `git diff canvas/main HEAD` → parsed old/new models → list of
     operations
-  - `push.py`: checks, staleness check, apply, refetch, ID write-back
+  - `push.py`: checks, staleness check, apply, refetch, post-push snapshot + fast-forward
 - Rate limits: follow `X-Rate-Limit-Remaining`, and back off on 403.
 - Tests:
   - **Serialization stability** (the most important test): fetching twice with
@@ -539,7 +546,7 @@ and is unchanged.
 1. `clone`/`fetch` for pages + assignments (no overrides), with canonical
    serialization and the stability tests. This is the foundation; get it
    right first.
-2. `pull`, `push` with all push checks, ID write-back, the endpoint
+2. `pull`, `push` with all push checks, post-push fast-forward, the endpoint
    allowlist, the live submission guard and pre-push backups. (Submission
    safety is in place before the first real push, not added later.)
 3. Assignment overrides + roster handling.

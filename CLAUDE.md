@@ -100,7 +100,7 @@ These exist once the scaffold bead is merged.
   `httpx`/`requests` anywhere else in `src/`. Never widen
   `remote/allowlist.py` without saying why in the PR body; reviewers check it
   every time.
-- Tests use `tests/fake_canvas.py`. No test reaches the network except those
+- Tests use `tests/fake_canvas/`. No test reaches the network except those
   under `tests/integration/`.
 - Never put tokens, student names, login IDs or SIS IDs in logs, test
   fixtures or commits. Fixtures use invented people.
