@@ -6,10 +6,11 @@ before any I/O. The path that is checked is the path that is sent.
 
 from __future__ import annotations
 
+import re
 import time
 from collections.abc import Callable
 from typing import Any, Literal
-from urllib.parse import quote, urljoin, urlsplit
+from urllib.parse import SplitResult, parse_qsl, quote, urljoin, urlsplit
 
 import httpx
 
@@ -24,6 +25,9 @@ API_PREFIX = "/api/v1"
 RATE_LIMIT_LOW_WATER = 50.0
 RATE_LIMIT_PAUSE = 1.0
 MAX_RETRIES = 5
+RETRY_AFTER_CAP = 60.0
+_FILE_RE = re.compile(r"/files/([0-9]+)")
+_FOLDER_RE = re.compile(r"/folders/([0-9]+)(/.*)?")
 BACKOFF_BASE = 1.0
 MAX_PAGES = 10_000
 MAX_REDIRECTS = 5
@@ -31,12 +35,33 @@ _BODY_LIMIT = 500
 _SAFE = "/:@!$&'()*+,=-._~"
 
 
+def _split(url: str) -> SplitResult:
+    try:
+        parts = urlsplit(url)
+        parts.port  # noqa: B018  (validates the port)
+    except ValueError:
+        raise ForbiddenEndpoint("refusing malformed URL") from None
+    return parts
+
+
 def _origin(url: str) -> tuple[str, str, int]:
-    parts = urlsplit(url)
+    parts = _split(url)
     scheme = parts.scheme.lower()
     host = (parts.hostname or "").lower()
     port = parts.port or (443 if scheme == "https" else 80)
     return scheme, host, port
+
+
+def _has_method_override(obj: Any) -> bool:
+    """True if a ``_method`` key (any case) appears anywhere in a request payload."""
+    if isinstance(obj, dict):
+        return any(
+            (isinstance(k, str) and k.lower() == "_method") or _has_method_override(v)
+            for k, v in obj.items()  # pyright: ignore[reportUnknownVariableType]
+        )
+    if isinstance(obj, (list, tuple)):
+        return any(_has_method_override(v) for v in obj)  # pyright: ignore[reportUnknownVariableType]
+    return False
 
 
 class CanvasClient:
@@ -53,7 +78,10 @@ class CanvasClient:
         root = base_url.rstrip("/")
         if root.endswith(API_PREFIX):
             root = root[: -len(API_PREFIX)]
-        parts = urlsplit(root)
+        try:
+            parts = _split(root)
+        except ForbiddenEndpoint:
+            raise ValueError("base_url is malformed") from None
         if parts.scheme not in ("http", "https") or not parts.hostname or parts.username:
             raise ValueError("base_url must be an http(s) URL without credentials")
         if mode not in ("read", "write"):
@@ -118,11 +146,43 @@ class CanvasClient:
 
     def delete(self, path: str, params: dict[str, Any] | None = None) -> Any:
         url = self._resolve("DELETE", path)
+        self._scope_check(url)
         return self._json(self._api("DELETE", url, params=params))
 
     def _write(self, method: str, path: str, data: Any, json: Any) -> Any:
         url = self._resolve(method, path)
+        self._scope_check(url)
         return self._json(self._api(method, url, data=data, json=json))
+
+    def _scope_check(self, url: str) -> None:
+        """Course lock for global ids: a write to /files/N or under /folders/N is allowed
+        only if the folder's context is this course (never a user's submission files)."""
+        path = urlsplit(url).path[len(API_PREFIX) :]
+        m = _FILE_RE.fullmatch(path)
+        if m:
+            file: Any = self.get_one(f"/files/{m.group(1)}")
+            fdict: dict[str, Any] = file if isinstance(file, dict) else {}  # pyright: ignore[reportUnknownVariableType]
+            folder_id = fdict.get("folder_id")
+            if not isinstance(folder_id, int) or isinstance(folder_id, bool):
+                raise ForbiddenEndpoint(f"refusing write to file {m.group(1)}: folder unknown")
+            self._assert_course_folder(folder_id)
+            return
+        m = _FOLDER_RE.fullmatch(path)
+        if m:
+            self._assert_course_folder(int(m.group(1)))
+
+    def _assert_course_folder(self, folder_id: int) -> None:
+        folder: Any = self.get_one(f"/folders/{folder_id}")
+        ok = False
+        if isinstance(folder, dict):
+            info: dict[str, Any] = folder  # pyright: ignore[reportUnknownVariableType]
+            ok = info.get("context_type") == "Course" and str(info.get("context_id")) == str(
+                self.course_id
+            )
+        if not ok:
+            raise ForbiddenEndpoint(
+                f"refusing write: folder {folder_id} does not belong to course {self.course_id}"
+            )
 
     # ---- files -----------------------------------------------------------
 
@@ -185,7 +245,7 @@ class CanvasClient:
         """
         current = url
         for _ in range(MAX_REDIRECTS + 1):
-            parts = urlsplit(current)
+            parts = _split(current)
             if parts.username or parts.password or parts.scheme not in ("http", "https"):
                 raise ForbiddenEndpoint("refusing download URL with credentials or odd scheme")
             if _origin(current) == self._origin:
@@ -225,7 +285,7 @@ class CanvasClient:
         if target.startswith("/") and not target.startswith("//"):
             raw_path = target
         else:
-            parts = urlsplit(target)
+            parts = _split(target)
             if (
                 _origin(target) != self._origin
                 or parts.username
@@ -235,18 +295,22 @@ class CanvasClient:
             ):
                 raise ForbiddenEndpoint("refusing URL outside this Canvas API")
             raw_path, query = parts.path, parts.query
+        if _has_method_override(dict(parse_qsl(query, keep_blank_values=True))):
+            raise ForbiddenEndpoint("refusing _method override in query")
         path = normalize_path(raw_path)
         assert_allowed(method, path, self.course_id)
         return self._origin_url(API_PREFIX + path, query)
 
     def _check_external(self, url: str) -> None:
-        parts = urlsplit(url)
+        parts = _split(url)
         if parts.username or parts.password or not parts.hostname or parts.fragment:
             raise ForbiddenEndpoint("refusing upload URL with credentials")
-        if parts.scheme != "https" and _origin(url) != self._origin:
-            raise ForbiddenEndpoint("refusing non-https upload URL on another host")
-        if parts.scheme not in ("http", "https"):
-            raise ForbiddenEndpoint("refusing upload URL with odd scheme")
+        if _origin(url) == self._origin:
+            raise ForbiddenEndpoint("refusing upload URL on the Canvas origin")
+        if _has_method_override(dict(parse_qsl(parts.query, keep_blank_values=True))):
+            raise ForbiddenEndpoint("refusing _method override in upload URL")
+        if parts.scheme != "https":
+            raise ForbiddenEndpoint("refusing non-https upload URL")
 
     def _json(self, resp: httpx.Response) -> Any:
         if not resp.content.strip():
@@ -267,22 +331,33 @@ class CanvasClient:
 
         Returns responses with status < 400 (3xx included; callers decide).
         """
+        if any(_has_method_override(kwargs.get(k)) for k in ("data", "json", "params")):
+            raise ForbiddenEndpoint("refusing _method override in request payload")
         headers = {"Authorization": f"Bearer {self._token}"} if auth else {}
+        # Only idempotent methods are retried on 5xx / network errors; a POST or PUT is
+        # retried only when Canvas says it was throttled (the request was not processed).
+        idempotent = method in ("GET", "DELETE")
         for attempt in range(MAX_RETRIES + 1):
+            delay = BACKOFF_BASE * 2**attempt
             try:
                 resp = self._http.request(method, url, headers=headers, **kwargs)
             except httpx.HTTPError as exc:
                 # Not chained: the exception text must never carry request headers.
-                if attempt < MAX_RETRIES:
-                    self._sleep(BACKOFF_BASE * 2**attempt)
+                if idempotent and attempt < MAX_RETRIES:
+                    self._sleep(delay)
                     continue
                 raise CanvasAPIError(0, f"network error: {type(exc).__name__}") from None
             body = resp.text[:_BODY_LIMIT] if resp.status_code >= 400 else ""
-            retryable = resp.status_code >= 500 or (
+            throttled = resp.status_code == 429 or (
                 resp.status_code == 403 and "rate limit exceeded" in body.lower()
             )
+            if resp.status_code == 429:
+                retry_after = resp.headers.get("Retry-After", "")
+                if retry_after.isdigit():
+                    delay = min(float(retry_after), RETRY_AFTER_CAP)
+            retryable = throttled or (idempotent and resp.status_code >= 500)
             if retryable and attempt < MAX_RETRIES:
-                self._sleep(BACKOFF_BASE * 2**attempt)
+                self._sleep(delay)
                 continue
             if resp.status_code >= 400:
                 raise CanvasAPIError(resp.status_code, body)

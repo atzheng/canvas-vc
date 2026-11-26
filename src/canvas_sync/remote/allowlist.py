@@ -76,6 +76,23 @@ _DELETE_DENIED = [
 ]
 
 
+_RESOURCE_PARENTS = frozenset({"courses", "assignments", "sections", "users", "quizzes", "folders"})
+
+
+def _hits_denied_resource(path: str) -> bool:
+    """True if a denied name sits in a *resource position*: a top-level segment, or
+    right after ``/<parent>/<id>/``. Page slugs (``/pages/quizzes``) are not resources."""
+    segs = path.split("/")[1:]
+    for i, seg in enumerate(segs):
+        if seg.lower() not in _WRITE_DENIED_SEGMENTS:
+            continue
+        if i == 0:
+            return True
+        if i >= 2 and segs[i - 2].lower() in _RESOURCE_PARENTS and segs[i - 1].isdigit():
+            return True
+    return False
+
+
 def normalize_path(path: str, *, strip_api_prefix: bool = True) -> str:
     """Return the canonical decoded path, or raise ForbiddenEndpoint.
 
@@ -123,8 +140,7 @@ def assert_allowed(method: str, path: str, course_id: int) -> str:
     """
     method = method.upper()
     if method != "GET":
-        segs = {s.lower() for s in path.split("/")}
-        if segs & _WRITE_DENIED_SEGMENTS:
+        if _hits_denied_resource(path):
             raise ForbiddenEndpoint(f"{method} {path} is never allowed")
         if method == "DELETE" and any(re.fullmatch(p, path, re.ASCII) for p in _DELETE_DENIED):
             raise ForbiddenEndpoint(f"{method} {path} is never allowed")

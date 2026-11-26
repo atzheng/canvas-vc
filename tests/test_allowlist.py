@@ -203,7 +203,6 @@ ALLOWED_CALLS: list[tuple[str, str]] = [
     ("PUT", f"/courses/{C}/pages/my%20page"),
     ("PUT", f"/courses/{C}/assignments/1"),
     ("DELETE", f"/courses/{C}/modules/1/items/2"),
-    ("DELETE", "/files/5"),
 ]
 
 
@@ -245,3 +244,61 @@ def test_repr_and_errors_hide_token() -> None:
     with pytest.raises(ForbiddenEndpoint) as ei:
         client.delete(f"/courses/{C}")
     assert "secret-token" not in str(ei.value)
+
+
+@pytest.mark.parametrize("slug", ["quizzes", "enrollments", "submissions", "new_quizzes"])
+def test_page_slugs_named_like_denied_resources_are_allowed(slug: str) -> None:
+    client, rec = make()
+    client.put(f"/courses/{C}/pages/{slug}", data={"x": 1})
+    client.delete(f"/courses/{C}/pages/{slug}")
+    assert len(rec.requests) == 2
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        f"/courses/{C}/assignments/1/submissions",
+        f"/courses/{C}/assignments/1/submissions/2/comments",
+        f"/courses/{C}/quizzes/5/submissions",
+        f"/courses/{C}/enrollments/3",
+        "/sections/1/enrollments",
+    ],
+)
+def test_resource_position_denied_names_still_refused(path: str) -> None:
+    client, rec = make()
+    with pytest.raises(ForbiddenEndpoint):
+        client.put(path, data={})
+    assert rec.requests == []
+
+
+@pytest.mark.parametrize("key", ["_method", "_METHOD", "_Method"])
+def test_method_override_rejected(key: str) -> None:
+    client, rec = make()
+    with pytest.raises(ForbiddenEndpoint):
+        client.post(f"/courses/{C}/pages", data={key: "delete"})
+    with pytest.raises(ForbiddenEndpoint):
+        client.post(f"/courses/{C}/pages", json={"wiki_page": {key: "delete"}})
+    with pytest.raises(ForbiddenEndpoint):
+        client.get(f"/courses/{C}/pages", params={key: "delete"})
+    with pytest.raises(ForbiddenEndpoint):
+        client.delete(f"/courses/{C}/pages/x", params={key: "delete"})
+    with pytest.raises(ForbiddenEndpoint):
+        client.get_one(f"{BASE}/api/v1/courses/{C}/pages?{key}=delete")
+    assert rec.requests == []
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://canvas.example.edu:99999/api/v1/courses/42",
+        "https://canvas.example.edu:abc/api/v1/courses/42",
+        "https://[::1/api/v1/courses/42",
+    ],
+)
+def test_malformed_url_is_forbidden_not_valueerror(url: str) -> None:
+    client, rec = make()
+    with pytest.raises(ForbiddenEndpoint):
+        client.get_one(url)
+    with pytest.raises(ForbiddenEndpoint):
+        client.download(url)
+    assert rec.requests == []

@@ -125,7 +125,7 @@ def test_rate_limit_403_retried_then_succeeds() -> None:
     assert sleeps == [1.0, 2.0]
 
 
-def test_5xx_retried_then_api_error() -> None:
+def test_5xx_retried_then_api_error_get() -> None:
     n = {"i": 0}
 
     def h(req: httpx.Request) -> httpx.Response:
@@ -310,3 +310,133 @@ def test_base_url_with_api_suffix_and_bad_base() -> None:
     assert c.base_url == BASE
     with pytest.raises(ValueError):
         CanvasClient("ftp://x", "t", course_id=C, mode="read")
+
+
+@pytest.mark.parametrize("method", ["POST", "PUT"])
+def test_non_idempotent_5xx_sent_once(method: str) -> None:
+    n = {"i": 0}
+
+    def h(req: httpx.Request) -> httpx.Response:
+        n["i"] += 1
+        return httpx.Response(500, text="oops")
+
+    client, sleeps = make(h)
+    path = f"/courses/{C}/pages" if method == "POST" else f"/courses/{C}/pages/x"
+    with pytest.raises(CanvasAPIError) as ei:
+        client.post(path, data={}) if method == "POST" else client.put(path, data={})
+    assert ei.value.status == 500 and n["i"] == 1 and sleeps == []
+
+
+def test_post_network_error_not_retried() -> None:
+    n = {"i": 0}
+
+    def h(req: httpx.Request) -> httpx.Response:
+        n["i"] += 1
+        raise httpx.ReadTimeout("t", request=req)
+
+    client, sleeps = make(h)
+    with pytest.raises(CanvasAPIError):
+        client.post(f"/courses/{C}/pages", data={})
+    assert n["i"] == 1 and sleeps == []
+
+
+def test_delete_5xx_retried() -> None:
+    n = {"i": 0}
+
+    def h(req: httpx.Request) -> httpx.Response:
+        n["i"] += 1
+        return httpx.Response(502) if n["i"] < 3 else httpx.Response(200, json={})
+
+    client, sleeps = make(h)
+    client.delete(f"/courses/{C}/pages/x")
+    assert n["i"] == 3 and len(sleeps) == 2
+
+
+def test_post_throttle_429_retry_after_honoured_and_capped() -> None:
+    n = {"i": 0}
+
+    def h(req: httpx.Request) -> httpx.Response:
+        n["i"] += 1
+        if n["i"] == 1:
+            return httpx.Response(429, headers={"Retry-After": "7"})
+        if n["i"] == 2:
+            return httpx.Response(429, headers={"Retry-After": "9999"})
+        if n["i"] == 3:
+            return httpx.Response(403, text="Rate Limit Exceeded")
+        return httpx.Response(200, json={"id": 1})
+
+    client, sleeps = make(h)
+    assert client.post(f"/courses/{C}/pages", data={}) == {"id": 1}
+    assert sleeps == [7.0, 60.0, 4.0]
+
+
+def folder_handler(context_type: str, context_id: int, log: list[tuple[str, str]]) -> Handler:
+    def h(req: httpx.Request) -> httpx.Response:
+        log.append((req.method, req.url.path))
+        if req.method == "GET" and req.url.path == "/api/v1/files/5":
+            return httpx.Response(200, json={"id": 5, "folder_id": 8})
+        if req.method == "GET" and req.url.path == "/api/v1/folders/8":
+            return httpx.Response(
+                200, json={"id": 8, "context_type": context_type, "context_id": context_id}
+            )
+        return httpx.Response(200, json={"ok": True})
+
+    return h
+
+
+@pytest.mark.parametrize(
+    ("op", "target"),
+    [("PUT", "/files/5"), ("DELETE", "/files/5"), ("POST", "/folders/8/files")],
+)
+def test_course_file_and_folder_writes_allowed(op: str, target: str) -> None:
+    log: list[tuple[str, str]] = []
+    client, _ = make(folder_handler("Course", C, log))
+    {"PUT": client.put, "DELETE": client.delete, "POST": client.post}[op](target)
+    assert log[-1][0] == op
+    assert ("GET", "/api/v1/folders/8") in log[:-1]
+
+
+@pytest.mark.parametrize(
+    ("op", "target"),
+    [("PUT", "/files/5"), ("DELETE", "/files/5"), ("POST", "/folders/8/files")],
+)
+@pytest.mark.parametrize("ctx", [("User", C), ("Course", 43), ("Group", C)])
+def test_foreign_file_and_folder_writes_refused(op: str, target: str, ctx: tuple[str, int]) -> None:
+    """A student's submission attachment lives in a user folder: never writable."""
+    log: list[tuple[str, str]] = []
+    client, _ = make(folder_handler(ctx[0], ctx[1], log))
+    with pytest.raises(ForbiddenEndpoint):
+        {"PUT": client.put, "DELETE": client.delete, "POST": client.post}[op](target)
+    assert all(m == "GET" for m, _ in log)
+
+
+def test_file_without_folder_refused() -> None:
+    client, _ = make(lambda r: httpx.Response(200, json={"id": 5}))
+    with pytest.raises(ForbiddenEndpoint):
+        client.delete("/files/5")
+
+
+def test_upload_url_on_canvas_origin_refused() -> None:
+    seen: list[str] = []
+
+    def h(req: httpx.Request) -> httpx.Response:
+        seen.append(str(req.url))
+        return httpx.Response(
+            200, json={"upload_url": f"{BASE}/api/v1/courses/{C}/pages", "upload_params": {}}
+        )
+
+    client, _ = make(h)
+    with pytest.raises(ForbiddenEndpoint):
+        client.upload_file("/", "a", b"x")
+    assert len(seen) == 1
+
+
+def test_upload_params_method_override_refused() -> None:
+    def h(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, json={"upload_url": "https://up.example.com/", "upload_params": {"_method": "x"}}
+        )
+
+    client, _ = make(h)
+    with pytest.raises(ForbiddenEndpoint):
+        client.upload_file("/", "a", b"x")
