@@ -62,19 +62,17 @@ def _config_of(data: bytes) -> CourseConfig | None:
         return None
 
 
-def _course_yaml(root: Path, course: Course, dumped: bytes, candidates: list[str]) -> bytes:
-    """Keep the user's hand-edited course.yaml when it parses to the same config.
+def _course_yaml(root: Path, course: Course, dumped: bytes, prev: str | None) -> bytes:
+    """Reuse an existing course.yaml's bytes when it parses to the same config.
 
     ``dump_tree`` writes only non-default fields and drops comments, so using its output
-    would make every merge show a spurious course.yaml diff (and could replace the user's
-    comments). The canonical dump is used only when no candidate commit has a course.yaml
-    with an equal parsed config.
+    would make merges show a spurious course.yaml diff. Source, in order: the previous
+    canvas/main (so a comment-only edit by the user never makes snapshot() see a change);
+    on the first snapshot, the user's HEAD; else the canonical dump.
     """
-    for commit in candidates:
-        try:
-            old = gitops.read_tree_files(root, commit).get(CONFIG_PATH)
-        except gitops.GitError:
-            continue
+    commit = prev or gitops.head_commit(root)
+    if commit is not None:
+        old = gitops.read_file_at(root, commit, CONFIG_PATH)
         if old is not None and _config_of(old) == course.config:
             return old
     return dumped
@@ -93,14 +91,13 @@ def snapshot(
     Returns None, creating nothing, when the tree equals canvas/main's and there is no
     ``extra_parent``. Never touches the work tree or the user's index.
 
-    course.yaml comes from the user's side where possible (HEAD, then the previous
-    canvas/main) when it parses to the same config; see ``_course_yaml``.
+    course.yaml bytes are reused from the previous canvas/main (first snapshot: HEAD)
+    when they parse to the same config; see ``_course_yaml``.
     """
     prev = gitops.ref_commit(root)
     dumped = dump_tree(course)
     files: dict[str, bytes | BlobRef] = dict(dumped)
-    candidates = [c for c in (gitops.head_commit(root), prev) if c]
-    files[CONFIG_PATH] = _course_yaml(root, course, dumped[CONFIG_PATH], candidates)
+    files[CONFIG_PATH] = _course_yaml(root, course, dumped[CONFIG_PATH], prev)
     files[BODIES_PATH] = bodies.dump()
 
     prev_files: dict[str, bytes] | None = None

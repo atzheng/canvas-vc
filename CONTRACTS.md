@@ -605,16 +605,17 @@ Implementation notes (fixed in 2zk.6):
 - Trees are built in a temporary `GIT_INDEX_FILE`; the user's index and work
   tree are never touched. Only `merge` and `fast_forward` change the work tree.
 - `update_ref` raises `gitops.RefMoved` (a `GitError`, a `CanvasSyncError`) when
-  the ref is not at `old` (`None` = must not exist). `gitops.BlobRef` lives in
+  the ref is not at `old` (`None` = must not exist); other failures raise `GitError`. `gitops.BlobRef` lives in
   `gitops.py`; it is resolved from `.git/canvas-blobs/` (the common git dir).
 - `snapshot` writes a `BlobRef` for every `files_meta.files` entry with a
   `sha256`. If the blob is missing from the store it is recovered from the
   previous canvas/main tree when the hash matches, else snapshot raises and
   nothing is written.
 - **course.yaml.** It stays in the snapshot tree (so `load_course_at` works),
-  but `dump_tree` output is only used when needed. If the user's HEAD (else the
-  previous canvas/main) has a `course.yaml` that parses to a config equal to
-  `course.config`, its exact bytes are reused. A merge of canvas/main therefore
+  but `dump_tree` output is only used when needed. If the previous canvas/main
+  (on the first snapshot: the user's HEAD) has a `course.yaml` that parses to a
+  config equal to `course.config`, its exact bytes are reused, so a comment-only
+  user edit never makes an unchanged Course produce a commit. A merge of canvas/main therefore
   never shows a spurious course.yaml diff or drops the user's comments. If the
   parsed config differs, the canonical dump is used.
 - `merge` passes `--allow-unrelated-histories` (the first fetch makes a root

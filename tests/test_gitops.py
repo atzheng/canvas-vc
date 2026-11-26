@@ -364,3 +364,26 @@ def test_ignore_load_and_add(tmp_path: Path) -> None:
     text = (tmp_path / ".canvasignore").read_text()
     assert text == "*.tmp\n/assignments/hw #1 \\[x\\].md\n"
     assert IgnoreRules.load(tmp_path).ignored("assignments/hw #1 [x].md")
+
+
+def test_snapshot_unchanged_after_comment_only_course_yaml_edit(repo: Path) -> None:
+    commit_file(repo, "course.yaml", HAND_EDITED)
+    store = BlobStore(repo)
+    c1 = snapshot(repo, course(), FakeBodies(), store, "m")
+    assert c1 is not None
+    commit_file(repo, "course.yaml", HAND_EDITED + "# another comment\n")
+    assert snapshot(repo, course(), FakeBodies(), store, "m") is None
+    assert gitops.ref_commit(repo) == c1
+
+
+def test_update_ref_other_failures_are_errors_not_refmoved(repo: Path) -> None:
+    a = commit_file(repo, "a", "1")
+    with pytest.raises(GitError) as e:
+        gitops.update_ref(repo, "refs/bad..name", a, None)
+    assert not isinstance(e.value, RefMoved)
+
+
+def test_read_file_at(repo: Path) -> None:
+    c = commit_file(repo, "d/f.txt", "hi")
+    assert gitops.read_file_at(repo, c, "d/f.txt") == b"hi"
+    assert gitops.read_file_at(repo, c, "nope") is None

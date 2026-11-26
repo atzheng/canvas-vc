@@ -202,10 +202,21 @@ def update_ref(root: Path, ref: str, new: str, old: str | None) -> None:
     proc = _run(
         root,
         ["update-ref", "-m", "canvas-sync", ref, new, expected],
-        ok=(0, 128, 1),
+        ok=tuple(range(256)),
     )
-    if proc.returncode != 0:
+    if proc.returncode == 0:
+        return
+    err = proc.stderr.decode(errors="replace").strip()
+    if "but expected" in err or "reference already exists" in err or "unable to resolve" in err:
         raise RefMoved(f"{ref} changed while it was being updated; try again")
+    raise GitError(f"git update-ref failed: {err.splitlines()[-1] if err else proc.returncode}")
+
+
+def read_file_at(root: Path, commit: str, path: str) -> bytes | None:
+    """Contents of one file in a commit, or None if the commit has no such file."""
+    if not _run(root, ["ls-tree", "-z", commit, "--", path]).stdout:
+        return None
+    return _run(root, ["cat-file", "blob", f"{commit}:{path}"]).stdout
 
 
 def is_ancestor(root: Path, a: str, b: str) -> bool:
@@ -274,6 +285,9 @@ def load_course_at(root: Path, commit: str) -> Course:
 
 def merge(root: Path, ref: str = REMOTE_REF, rebase: bool = False) -> int:
     """Run ``git merge`` (or ``rebase``) of ``ref`` in the work tree; returns the exit code.
+
+    This is the user's own merge: it runs their hooks and honours their commit signing
+    settings. (``commit_tree``, used for canvas/main snapshots, runs neither.)
 
     A conflict gives a non-zero code and leaves markers in the work tree, as git does.
     Unrelated histories are allowed for merge: the first fetch creates a root commit
