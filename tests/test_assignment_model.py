@@ -123,12 +123,12 @@ def test_overrides_only_fixed_point(tmp_path: Path) -> None:
 
 def test_sort_overrides() -> None:
     assert [o.target() for o in sort_overrides(OVERRIDES)] == [
-        ("section", "BA1"),
-        ("section", "BA2"),
-        ("group", "Team 1"),
-        ("group", "Team 4"),
-        ("students", "amy,zed"),
-        ("students", "bob"),
+        ("section", ("BA1",)),
+        ("section", ("BA2",)),
+        ("group", ("Team 1",)),
+        ("group", ("Team 4",)),
+        ("students", ("amy", "zed")),
+        ("students", ("bob",)),
     ]
 
 
@@ -219,3 +219,48 @@ def test_check_override_targets() -> None:
         "assignments/a.md: unknown group 'Y'",
         "assignments/a.md: unknown student 'who'",
     ]
+
+
+def test_student_in_two_sets_rejected() -> None:
+    sets = [Override(students=["amy", "bob"]), Override(students=["amy", "zed"])]
+    with pytest.raises(ValidationError, match="student 'amy' appears in more than one"):
+        make(overrides=sets)
+
+
+def test_identical_student_sets_rejected() -> None:
+    with pytest.raises(ValidationError, match="student 'amy' appears in more than one"):
+        make(overrides=[Override(students=["amy"]), Override(students=["amy"], title="x")])
+
+
+def test_target_distinguishes_comma_names() -> None:
+    assert Override(students=["a,b"]).target() != Override(students=["a", "b"]).target()
+
+
+def test_sort_is_input_order_independent() -> None:
+    same = [
+        Override(section="S", due=dt("2026-09-02")),
+        Override(section="S", due=dt("2026-09-01")),
+        Override(section="S"),
+        Override(section="S", lock=dt("2026-09-01")),
+    ]
+    first = sort_overrides(same)
+    assert first[0].due is None and first[0].lock is None
+    for seed in range(10):
+        shuffled = list(same)
+        random.Random(seed).shuffle(shuffled)
+        assert sort_overrides(shuffled) == first
+
+
+def test_bad_date_error_names_file_key_and_index(tmp_path: Path) -> None:
+    root = tmp_path / "t"
+    (root / "assignments").mkdir(parents=True)
+    f = root / "assignments" / "a.md"
+    f.write_text("---\ntitle: A\ndue: notadate\n---\n")
+    with pytest.raises(ValidationError, match=r"^assignments/a.md: due: invalid date 'notadate'"):
+        ASSIGNMENT_SPEC.load(root, CFG)
+    f.write_text("---\ntitle: A\noverrides:\n  - section: S\n  - section: T\n    lock: zz\n---\n")
+    with pytest.raises(ValidationError, match=r"^assignments/a.md: override 2: lock: invalid date"):
+        ASSIGNMENT_SPEC.load(root, CFG)
+    f.write_text("---\ntitle: A\noverrides:\n  - section: S\n  - bogus: 1\n---\n")
+    with pytest.raises(ValidationError, match=r"assignments/a.md: overrides.2"):
+        ASSIGNMENT_SPEC.load(root, CFG)

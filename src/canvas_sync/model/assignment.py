@@ -98,7 +98,10 @@ def _build(meta: dict[str, Any], body: str, cfg: CourseConfig, path: str) -> Ass
     unlock_t, due_t = d.unlock_time, d.assignment.due_time
     for key in ov.DATE_KEYS:
         if meta.get(key) is not None:
-            meta[key] = parse_local(meta[key], cfg.tz, unlock_t if key == "unlock" else due_t)
+            try:
+                meta[key] = parse_local(meta[key], cfg.tz, unlock_t if key == "unlock" else due_t)
+            except ValidationError as e:
+                raise ValidationError(f"{path}: {key}: {e}") from None
     raw_overrides = meta.get("overrides")
     if raw_overrides is not None:
         if not isinstance(raw_overrides, list):
@@ -107,15 +110,20 @@ def _build(meta: dict[str, Any], body: str, cfg: CourseConfig, path: str) -> Ass
         for i, item in enumerate(cast("list[Any]", raw_overrides), 1):
             if not isinstance(item, dict):
                 raise ValidationError(f"{path}: override {i} must be a mapping")
-            parsed.append(
-                ov.parse_override_dates(cast("dict[str, Any]", item), cfg.tz, unlock_t, due_t)
-            )
+            try:
+                parsed.append(
+                    ov.parse_override_dates(
+                        cast("dict[str, Any]", item), cfg.tz, unlock_t, due_t, i
+                    )
+                )
+            except ValidationError as e:
+                raise ValidationError(f"{path}: {e}") from None
         meta["overrides"] = parsed
     try:
         return Assignment(body=body, **meta)
     except PydanticValidationError as e:
         err = e.errors()[0]
-        loc = ".".join(str(x) for x in err["loc"])
+        loc = ".".join(str(x + 1 if isinstance(x, int) else x) for x in err["loc"])  # 1-based
         raise ValidationError(f"{path}: {loc}: {err['msg']}") from None
     except ValidationError as e:
         raise ValidationError(f"{path}: {e}") from None

@@ -50,21 +50,30 @@ class Override(BaseModel):
             )
         return self
 
-    def target(self) -> tuple[str, str]:
-        """``("section", name)``, ``("group", name)`` or ``("students", "a,b")``."""
+    def target(self) -> tuple[str, tuple[str, ...]]:
+        """``("section", (name,))``, ``("group", (name,))`` or ``("students", (a, b, ...))``."""
         if self.section is not None:
-            return ("section", self.section)
+            return ("section", (self.section,))
         if self.group is not None:
-            return ("group", self.group)
-        return ("students", ",".join(self.students or []))
+            return ("group", (self.group,))
+        return ("students", tuple(self.students or ()))
 
 
-def _sort_key(o: Override) -> tuple[int, str, tuple[str, ...], str]:
-    if o.section is not None:
-        return (0, o.section, (), "")
-    if o.group is not None:
-        return (1, o.group, (), "")
-    return (2, "", tuple(o.students or ()), o.title or "")
+def _date_key(d: LocalDT | None) -> tuple[int, float]:
+    return (0, 0.0) if d is None else (1, d.timestamp())
+
+
+def _sort_key(o: Override) -> tuple[Any, ...]:
+    """Total order: target, then title, then dates (None first)."""
+    kind = ("section", "group", "students").index(o.target()[0])
+    return (
+        kind,
+        o.target()[1],
+        o.title or "",
+        _date_key(o.due),
+        _date_key(o.unlock),
+        _date_key(o.lock),
+    )
 
 
 def sort_overrides(overrides: Iterable[Override]) -> list[Override]:
@@ -73,25 +82,37 @@ def sort_overrides(overrides: Iterable[Override]) -> list[Override]:
 
 
 def validate_overrides(overrides: Iterable[Override], what: str = "overrides") -> list[Override]:
-    """Canonically ordered copy; raises ValidationError if a section or group repeats."""
+    """Canonically ordered copy; raises ValidationError if a target repeats.
+
+    A section or group may appear once, and a student may be in only one
+    student-set override (this also rejects two identical sets).
+    """
     ordered = sort_overrides(overrides)
     seen: set[tuple[str, str]] = set()
     for o in ordered:
-        kind, name = o.target()
-        if kind == "students":
-            continue
-        if (kind, name) in seen:
-            raise ValidationError(f"{what}: {kind} {name!r} appears in more than one override")
-        seen.add((kind, name))
+        kind, names = o.target()
+        for name in names:
+            if (kind, name) in seen:
+                what_kind = "student" if kind == "students" else kind
+                raise ValidationError(
+                    f"{what}: {what_kind} {name!r} appears in more than one override"
+                )
+            seen.add((kind, name))
     return ordered
 
 
 def parse_override_dates(
-    raw: dict[str, Any], tz: ZoneInfo, unlock_time: time, due_time: time
+    raw: dict[str, Any], tz: ZoneInfo, unlock_time: time, due_time: time, index: int = 1
 ) -> dict[str, Any]:
-    """Copy of a raw override mapping with unlock/due/lock parsed to LocalDT."""
+    """Copy of a raw override mapping with unlock/due/lock parsed to LocalDT.
+
+    ``index`` is the 1-based position of the override, used in error messages.
+    """
     out = dict(raw)
     for key in DATE_KEYS:
         if out.get(key) is not None:
-            out[key] = parse_local(out[key], tz, unlock_time if key == "unlock" else due_time)
+            try:
+                out[key] = parse_local(out[key], tz, unlock_time if key == "unlock" else due_time)
+            except ValidationError as e:
+                raise ValidationError(f"override {index}: {key}: {e}") from None
     return out
