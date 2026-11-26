@@ -1,0 +1,10 @@
+{
+  "id": 1,
+  "name": "Project Teams",
+  "role": null,
+  "self_signup": null,
+  "group_limit": null,
+  "context_type": "Course",
+  "course_id": 1,
+  "auto_leader": null
+}

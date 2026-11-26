@@ -9,4 +9,4 @@ if TYPE_CHECKING:
 
 
 def register(fake: FakeCanvas) -> None:
-    """Add this resource's request handlers to `fake.handlers`."""
+    """Add this resource's routes with `fake.route(method, regex, handler)`; see core.py."""
