@@ -277,7 +277,8 @@ Round-trip property (tested with hypothesis over a Markdown corpus):
 # remote/http.py
 class CanvasClient:
     def __init__(self, base_url: str, token: str, *, course_id: int, mode: Literal["read", "write"],
-                 transport: httpx.BaseTransport | None = None): ...
+                 transport: httpx.BaseTransport | None = None,
+                 sleep: Callable[[float], None] = time.sleep): ...   # sleep injectable for tests
     def get(self, path: str, params=None) -> Any              # JSON; follows Link pagination, returns full list
     def get_one(self, path: str, params=None) -> Any
     def post(self, path: str, data=None, json=None) -> Any
@@ -293,6 +294,18 @@ class CanvasClient:
   allows only GET.
 - Rate limiting: reads `X-Rate-Limit-Remaining`; sleeps when it drops below
   50; retries 403 "Rate Limit Exceeded" and 5xx with exponential backoff (max 5).
+- Paths are normalised before matching (decoded once; query, fragment, `..`,
+  `.`, empty segments, encoded `/` and double encoding are refused; one
+  trailing slash dropped); the normalised path is the one sent. Absolute URLs
+  (pagination `next` links, upload confirm) must be on the client's own
+  origin under `/api/v1` and are re-checked like any other call.
+- Upload: step 1 is an allowlisted `POST`; step 2 posts multipart to the
+  server-given `upload_url` with no credentials (https, or the Canvas origin)
+  and no redirect following; step 3 is `GET /files/\d+/create_success` on the
+  Canvas origin (allowlisted). `download(url)`: on the Canvas host only
+  `/files/\d+/download` or `/courses/{c}/files/\d+/download` (with token);
+  other hosts must be https and never receive the token; redirects are
+  followed manually (max 5) and re-checked.
 - Tests inject `transport=FakeCanvas(...)` (§12). No test reaches the network.
 
 ```python
@@ -306,7 +319,7 @@ The initial list (paths relative to `/api/v1`, `{c}` = course id):
 GET    /courses/{c}  /courses/{c}/(pages|assignments|assignment_groups|discussion_topics|
        files|folders|modules|sections|groups|group_categories|users|enrollments)(/.*)?
        /courses/{c}/late_policy
-GET    /folders/\d+(/.*)?  /files/\d+  /users/self
+GET    /folders/\d+(/.*)?  /files/\d+  /files/\d+/create_success  /users/self
 POST   /courses/{c}/pages  /courses/{c}/assignments  /courses/{c}/assignment_groups
        /courses/{c}/discussion_topics  /courses/{c}/modules  /courses/{c}/modules/\d+/items
        /courses/{c}/assignments/\d+/overrides  /courses/{c}/files  /folders/\d+/files
