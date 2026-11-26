@@ -12,8 +12,9 @@ Per-resource modules (`pages.py`, `assignments.py`, ...) plug in with::
         fake.route("GET", r"/courses/\\d+/pages", list_pages)
 
 A route is `(method, regex, handler)`. The regex is matched with `fullmatch` against the path
-relative to `/api/v1` (or the raw path for `api=False` routes, which match any host and are for
-non-API URLs such as downloads and upload targets). A handler takes a `Req` and returns a
+relative to `/api/v1` (or the decoded raw path for `api=False` routes, which match any host
+and are for non-API URLs such as downloads; non-GET non-API routes must be `upload_target=True`).
+A handler takes a `Req` and returns a
 `list` (paginated for you), any other JSON value, an `httpx.Response`, or `None`; or raises
 `CanvasError`. Routes registered by resource modules win over the defaults in this file. Modules
 keep their data in `fake.state("<name>")` and draw ids from `fake.next_id()`.
@@ -72,8 +73,8 @@ class CanvasError(Exception):
 # ---- HTML sanitizer ------------------------------------------------------------------
 
 
-_SCRIPT = re.compile(r"<script\b.*?</script\s*>", re.IGNORECASE | re.DOTALL)
-_VOID = re.compile(r"<(br|hr|img)\b([^>]*?)\s*/?>", re.IGNORECASE)
+_SCRIPT = re.compile(r"<script(?=[\s/>]).*?</script\s*>", re.IGNORECASE | re.DOTALL)
+_VOID = re.compile(r"<(br|hr|img)(?=[\s/>])([^>]*?)\s*/?>", re.IGNORECASE)
 _BOLD = re.compile(r"<(/?)b(?=[\s>])", re.IGNORECASE)
 _ITALIC = re.compile(r"<(/?)i(?=[\s>])", re.IGNORECASE)
 _ANCHOR = re.compile(r"<a\b(?![^>]*\brel=)([^>]*)>", re.IGNORECASE)
@@ -85,13 +86,19 @@ def sanitize_html(html: str) -> str:
     Drops `<script>`, closes void tags (`<br />`), turns `<b>`/`<i>` into `<strong>`/`<em>`,
     adds `rel="noopener noreferrer"` to links and ends non-empty bodies with one newline.
     """
-    out = _SCRIPT.sub("", html)
-    out = _VOID.sub(lambda m: f"<{m.group(1).lower()}{m.group(2)} />", out)
-    out = _BOLD.sub(r"<\1strong", out)
-    out = _ITALIC.sub(r"<\1em", out)
-    out = _ANCHOR.sub(r'<a\1 rel="noopener noreferrer">', out)
-    out = out.rstrip()
-    return out + "\n" if out else ""
+    out = html
+    for _ in range(100):  # each rewrite can expose another (`<scr<script></script>ipt>`)
+        prev = out
+        out = _SCRIPT.sub("", out)
+        out = _VOID.sub(lambda m: f"<{m.group(1).lower()}{m.group(2)} />", out)
+        out = _BOLD.sub(r"<\1strong", out)
+        out = _ITALIC.sub(r"<\1em", out)
+        out = _ANCHOR.sub(r'<a\1 rel="noopener noreferrer">', out)
+        out = out.rstrip()
+        out = out + "\n" if out else ""
+        if out == prev:
+            break
+    return out
 
 
 # ---- request plumbing ----------------------------------------------------------------
@@ -159,6 +166,7 @@ class _Route:
     regex: re.Pattern[str]
     handler: Handler
     api: bool
+    upload_target: bool = False
 
 
 @dataclass
@@ -247,6 +255,9 @@ class FakeCanvas(httpx.BaseTransport):
         self.files: dict[int, dict[str, Any]] = {}
         self.file_content: dict[int, bytes] = {}
 
+        self.self_user: dict[str, Any] = self.fixture(
+            "user", id=self.next_id(), name="Tess Teacher", short_name="Tess"
+        )
         self.root_folder_id = self.add_folder("course files")["id"]
         self.add_section("Section 001")
 
@@ -257,10 +268,25 @@ class FakeCanvas(httpx.BaseTransport):
 
     # ---- extension API for resource modules ---------------------------------------
 
-    def route(self, method: str, pattern: str, handler: Handler, *, api: bool = True) -> None:
-        """Register a route. `{c}` in `pattern` stands for this fake's course id."""
+    def route(
+        self,
+        method: str,
+        pattern: str,
+        handler: Handler,
+        *,
+        api: bool = True,
+        upload_target: bool = False,
+    ) -> None:
+        """Register a route. `{c}` in `pattern` stands for this fake's course id.
+
+        `pattern` is matched against the decoded path. Non-GET requests outside `/api/v1/`
+        (any host) are refused unless a route with `upload_target=True` (which implies
+        `api=False`) matches: that is how a files module models the upload URL of step 2.
+        """
         regex = re.compile(pattern.replace("{c}", str(self.course_id)), re.ASCII)
-        self._routes.append(_Route(method.upper(), regex, handler, api))
+        self._routes.append(
+            _Route(method.upper(), regex, handler, api and not upload_target, upload_target)
+        )
 
     def next_id(self) -> int:
         self._ids += 1
@@ -407,7 +433,9 @@ class FakeCanvas(httpx.BaseTransport):
         for sub in submissions:
             sid = sub.get("id") or self.next_id()
             store.append(
-                self.fixture("submission", assignment_id=assignment_id, **{**sub, "id": sid})
+                self.fixture(
+                    "submission", assignment_id=assignment_id, **{**copy.deepcopy(sub), "id": sid}
+                )
             )
 
     def snapshot_submissions(self) -> dict[int, list[dict[str, Any]]]:
@@ -523,6 +551,8 @@ class FakeCanvas(httpx.BaseTransport):
         for route in self._routes:
             if route.method != entry.method or (route.api and not api):
                 continue
+            if not api and entry.method != "GET" and not route.upload_target:
+                continue
             m = route.regex.fullmatch(rel)
             if m is None:
                 continue
@@ -533,7 +563,8 @@ class FakeCanvas(httpx.BaseTransport):
             return self._finish(self._respond(result, entry))
 
         if entry.method != "GET":
-            raise FakeCanvasError(f"FakeCanvas has no route for {entry.method} {rel}")
+            where = "" if api else " outside /api/v1 (only upload_target routes accept writes)"
+            raise FakeCanvasError(f"FakeCanvas has no route for {entry.method} {rel}{where}")
         return self._finish(_error(404, "The specified resource does not exist."))
 
     def _finish(self, response: httpx.Response) -> httpx.Response:
@@ -572,8 +603,6 @@ class FakeCanvas(httpx.BaseTransport):
         links = [link(page, "current")]
         if page < last:
             links.append(link(page + 1, "next"))
-        if page > 1:
-            links.append(link(page - 1, "prev"))
         links += [link(1, "first"), link(last, "last")]
         chunk = items[(page - 1) * per_page : page * per_page]
         return httpx.Response(200, json=chunk, headers={"Link": ", ".join(links)})
@@ -583,7 +612,7 @@ class FakeCanvas(httpx.BaseTransport):
     def _register_defaults(self) -> None:
         r = self.route
         r("GET", r"/courses/{c}", lambda q: self.course)
-        r("GET", r"/users/self", lambda q: next(iter(self.users.values()), self.fixture("user")))
+        r("GET", r"/users/self", lambda q: self.self_user)
 
         r("GET", r"/courses/{c}/sections", lambda q: list(self.sections.values()))
         r("GET", r"/courses/{c}/sections/(\d+)", lambda q: _one(self.sections, q))

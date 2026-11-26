@@ -635,8 +635,9 @@ to `canvas/main`. There's no separate write-back commit.
   and writer beads add POST/PUT/DELETE behaviour in that module only. A
   module's `register(fake)` calls `fake.route(method, regex, handler)`
   (`{c}` in the regex is the course id; the regex is full-matched against the
-  path relative to `/api/v1`; `api=False` routes match raw non-API paths on
-  any host, for downloads and upload targets). A handler takes a `Req`
+  decoded path relative to `/api/v1`; `api=False` routes match raw non-API paths on
+  any host, for downloads; a non-GET outside `/api/v1/` is refused unless the
+  route has `upload_target=True`, as for upload step 2). A handler takes a `Req`
   (`.params`, `.body`, `.match`) and returns a list (paginated by the fake), a
   JSON value or an `httpx.Response`, or raises `CanvasError(status, msg)`.
   Module routes override core defaults. Modules keep data in

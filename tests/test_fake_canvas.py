@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import httpx
 import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 from canvas_sync.errors import CanvasAPIError, ForbiddenEndpoint
 from canvas_sync.remote.http import MAX_RETRIES
@@ -75,7 +77,7 @@ def test_link_headers(fake: FakeCanvas) -> None:
         params={"per_page": 2, "page": 2},
         headers={"Authorization": "Bearer x"},
     )
-    assert set(resp.links) == {"current", "next", "prev", "first", "last"}
+    assert set(resp.links) == {"current", "next", "first", "last"}
     assert "page=3" in resp.links["next"]["url"]
     assert "per_page=2" in resp.links["next"]["url"]
     last = httpx.Client(transport=fake).get(
@@ -234,3 +236,75 @@ def test_rate_limit_header(fake: FakeCanvas) -> None:
     client = fake.client("read")
     client.get_one(f"/courses/{C}")
     assert fake.sleeps  # the client paused because the budget was low
+
+
+def test_non_api_write_to_base_host_is_refused(fake: FakeCanvas) -> None:
+    raw = httpx.Client(transport=fake)
+    with pytest.raises(FakeCanvasError, match="outside /api/v1"):
+        raw.post(f"{fake.base_url}/courses/{C}/assignments/5/submissions/7")
+    # Even a registered ordinary non-API route does not accept writes.
+    fake.route("POST", r"/anything", lambda q: {}, api=False)
+    with pytest.raises(FakeCanvasError):
+        raw.post(f"{fake.base_url}/anything")
+    # Upload targets (any host) are the explicit exception.
+    fake.route("POST", r"/upload/\d+", lambda q: {"ok": True}, upload_target=True)
+    assert raw.post("https://uploads.test/upload/3").json() == {"ok": True}
+    assert raw.post(f"{fake.base_url}/upload/3").status_code == 200
+
+
+def test_seed_submissions_copies_nested_data(fake: FakeCanvas) -> None:
+    seed = {"user_id": 5, "attachments": [{"id": 1, "display_name": "a.txt"}]}
+    fake.seed_submissions(7, [seed])
+    seed["attachments"][0]["display_name"] = "changed"
+    seed["attachments"].append({"id": 2})
+    assert fake.submissions[7][0]["attachments"] == [{"id": 1, "display_name": "a.txt"}]
+
+
+def test_users_self_is_dedicated_teacher(fake: FakeCanvas) -> None:
+    fake.add_user("Ada Example")
+    me = fake.client("read").get_one("/users/self")
+    assert me["name"] == "Tess Teacher"
+    assert me["id"] not in fake.users
+
+
+def test_sanitizer_known_nested_cases() -> None:
+    for s in ["<scr<script></script>ipt>x</script>", "<br<a>", "<brx>", "<scripty>a</scripty>"]:
+        once = sanitize_html(s)
+        assert sanitize_html(once) == once, s
+
+
+@settings(max_examples=500, deadline=None)
+@given(
+    st.lists(
+        st.sampled_from(
+            [
+                "<",
+                ">",
+                "/",
+                " ",
+                "\n",
+                "b",
+                "i",
+                "a",
+                "br",
+                "img",
+                "hr",
+                "script",
+                "</script>",
+                "<script>",
+                "<br>",
+                "<b>",
+                "</b>",
+                "<i>",
+                "<a ",
+                "rel=",
+                "x",
+                '"',
+                "=",
+            ]
+        )
+    ).map("".join)
+)
+def test_sanitizer_idempotent_property(s: str) -> None:
+    once = sanitize_html(s)
+    assert sanitize_html(once) == once
