@@ -11,18 +11,26 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, cast
 
-from pydantic import BaseModel, ConfigDict, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    StrictInt,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 from pydantic import ValidationError as PydanticValidationError
 
 from canvas_sync.config import CourseConfig
 from canvas_sync.dates import LocalDT, parse_local
 from canvas_sync.errors import ValidationError
 from canvas_sync.model.base import CanvasObject, Kind
+from canvas_sync.model.overrides import Override, validate_overrides
 from canvas_sync.model.serialize import dump_yaml, load_yaml
 
 FILENAME = "modules.yaml"
 KEY_ORDER = ["canvas_id", "name", "published", "unlock", "overrides", "items"]
-OVERRIDE_KEY_ORDER = ["section", "group", "students", "title", "unlock"]
+OVERRIDE_KEY_ORDER = ["section", "group", "students", "unlock"]
 ITEM_KEY_ORDER = [
     "canvas_id",
     "page",
@@ -47,44 +55,24 @@ class UnmanagedRef(BaseModel):
     """Quiz or discussion item: an object canvas-sync does not manage."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
-    canvas_id: int
+    canvas_id: StrictInt
 
 
-class ModuleOverride(BaseModel):
-    """Module "Assign To" entry: exactly one of section, group, students, plus ``unlock``.
+class ModuleOverride(Override):
+    """Module "Assign To" entry: one target (section, group or students) plus ``unlock``.
 
-    Defined here (not imported from ``model/overrides.py``) because modules only
-    support ``unlock``; it may be unified with ``Override`` later.
+    Reuses ``Override`` for the target rule; modules only support ``unlock``,
+    so ``title``, ``due`` and ``lock`` are rejected and ``unlock`` is required.
     """
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
-    section: str | None = None
-    group: str | None = None
-    students: list[str] | None = None  # sorted
-    title: str | None = None
-    unlock: LocalDT | None = None
-
-    @field_validator("students")
-    @classmethod
-    def _sorted(cls, v: list[str] | None) -> list[str] | None:
-        return None if v is None else sorted(v)
-
     @model_validator(mode="after")
-    def _exactly_one_target(self) -> ModuleOverride:
-        n = sum(x is not None for x in (self.section, self.group, self.students))
-        if n != 1:
-            raise ValueError("a module override needs exactly one of section, group, students")
-        if self.students is not None and not self.students:
-            raise ValueError("students must not be empty")
+    def _unlock_only(self) -> ModuleOverride:
+        if self.unlock is None:
+            raise ValueError("a module override needs an unlock date")
+        extra = [k for k in ("title", "due", "lock") if getattr(self, k) is not None]
+        if extra:
+            raise ValueError(f"module overrides only support unlock (got {', '.join(extra)})")
         return self
-
-    def sort_key(self) -> tuple[int, str]:
-        """Sections by name, then groups by name, then student sets by first student."""
-        if self.section is not None:
-            return (0, self.section)
-        if self.group is not None:
-            return (1, self.group)
-        return (2, (self.students or [""])[0])
 
 
 class ModuleItem(BaseModel):
@@ -105,10 +93,18 @@ class ModuleItem(BaseModel):
     quiz: UnmanagedRef | None = None
     discussion: UnmanagedRef | None = None
     title: str | None = None
-    indent: int = 0
+    indent: StrictInt = 0
     new_tab: bool = False
     published: bool | None = None
-    canvas_id: int | None = None
+    canvas_id: StrictInt | None = None
+
+    @field_validator("indent", "new_tab", mode="before")
+    @classmethod
+    def _null_is_default(cls, v: object, info: ValidationInfo) -> object:
+        """Absent and null both mean "no value": 0 and False."""
+        if v is None:
+            return 0 if info.field_name == "indent" else False
+        return v
 
     @model_validator(mode="after")
     def _one_type(self) -> ModuleItem:
@@ -150,7 +146,7 @@ def _check_url(value: str) -> None:
 
 
 class Module(CanvasObject):
-    canvas_id: int | None = None  # pyright: ignore[reportIncompatibleVariableOverride]
+    canvas_id: StrictInt | None = None  # pyright: ignore[reportIncompatibleVariableOverride]
     name: str
     published: bool | None = None
     unlock: LocalDT | None = None
@@ -160,7 +156,7 @@ class Module(CanvasObject):
     @field_validator("overrides")
     @classmethod
     def _canonical_overrides(cls, v: list[ModuleOverride]) -> list[ModuleOverride]:
-        return sorted(v, key=ModuleOverride.sort_key)
+        return cast("list[ModuleOverride]", validate_overrides(v, "modules.yaml overrides"))
 
 
 # ---------------------------------------------------------------------------

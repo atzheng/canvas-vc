@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pytest
 from pydantic import ValidationError as PydanticValidationError
@@ -108,27 +110,65 @@ def test_bad_module_shapes(tmp_path: Path) -> None:
         _load(tmp_path, "- name: A\n  canvas_id: 7\n- name: B\n  canvas_id: 7\n")
 
 
-def test_override_needs_exactly_one_target() -> None:
-    with pytest.raises(PydanticValidationError):
-        ModuleOverride()
-    with pytest.raises(PydanticValidationError):
-        ModuleOverride(section="A", group="B")
-    with pytest.raises(PydanticValidationError):
-        ModuleOverride(students=[])
-    assert ModuleOverride(students=["b", "a"]).students == ["a", "b"]
+def test_override_rules() -> None:
+    d = datetime(2026, 9, 9, 9, 0, tzinfo=ZoneInfo("America/Vancouver"))
+    with pytest.raises(PydanticValidationError, match="unlock date"):
+        ModuleOverride(section="A")
+    with pytest.raises(PydanticValidationError, match="only support unlock"):
+        ModuleOverride(section="A", unlock=d, title="t")
+    with pytest.raises(PydanticValidationError, match="only support unlock"):
+        ModuleOverride(section="A", unlock=d, due=d)
+    with pytest.raises(ValidationError):
+        ModuleOverride(unlock=d)
+    with pytest.raises(ValidationError):
+        ModuleOverride(section="A", group="B", unlock=d)
+    assert ModuleOverride(students=["b", "a"], unlock=d).students == ["a", "b"]
+
+
+def test_load_override_without_unlock(tmp_path: Path) -> None:
+    with pytest.raises(ValidationError, match=r"\[0\]\.overrides\[0\].*unlock"):
+        _load(tmp_path, "- name: A\n  overrides:\n    - section: S\n")
 
 
 def test_overrides_canonical_order() -> None:
+    d = datetime(2026, 9, 9, 9, 0, tzinfo=ZoneInfo("America/Vancouver"))
     m = Module(
         name="M",
         overrides=[
-            ModuleOverride(students=["z"]),
-            ModuleOverride(group="G"),
-            ModuleOverride(section="B"),
-            ModuleOverride(section="A"),
+            ModuleOverride(students=["z"], unlock=d),
+            ModuleOverride(group="G", unlock=d),
+            ModuleOverride(section="B", unlock=d),
+            ModuleOverride(section="A", unlock=d),
         ],
     )
     assert [o.section or o.group or o.students for o in m.overrides] == ["A", "B", "G", ["z"]]
+
+
+def test_null_indent_and_new_tab_mean_default(tmp_path: Path, cfg: CourseConfig) -> None:
+    objs = _load(
+        tmp_path, "- name: A\n  items:\n    - page: p\n      indent: null\n      new_tab: ~\n"
+    )
+    (m,) = objs.values()
+    assert isinstance(m, Module)
+    assert m.items[0].indent == 0
+    assert m.items[0].new_tab is False
+    assert MODULE_SPEC.dump(objs, cfg)["modules.yaml"] == b"- name: A\n  items:\n    - page: p\n"
+    assert_spec_fixed_point(MODULE_SPEC, objs, cfg, tmp_path)
+
+
+def test_bool_canvas_id_and_indent_rejected(tmp_path: Path) -> None:
+    with pytest.raises(PydanticValidationError):
+        Module(name="A", canvas_id=True)  # pyright: ignore[reportArgumentType]
+    with pytest.raises(PydanticValidationError):
+        ModuleItem(page="p", canvas_id=True)  # pyright: ignore[reportArgumentType]
+    with pytest.raises(PydanticValidationError):
+        UnmanagedRef(canvas_id=True)  # pyright: ignore[reportArgumentType]
+    with pytest.raises(PydanticValidationError):
+        ModuleItem(page="p", indent=True)  # pyright: ignore[reportArgumentType]
+    with pytest.raises(ValidationError, match="modules.yaml"):
+        _load(tmp_path, "- name: A\n  canvas_id: true\n")
+    with pytest.raises(ValidationError, match="modules.yaml"):
+        _load(tmp_path, "- name: A\n  items:\n    - page: p\n      canvas_id: false\n")
 
 
 def test_order_preserved_exactly(tmp_path: Path, cfg: CourseConfig) -> None:
