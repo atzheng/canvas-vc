@@ -1,0 +1,14 @@
+{
+  "id": 1,
+  "assignment_id": 1,
+  "user_id": 1,
+  "submission_type": "online_text_entry",
+  "body": "<p>Example answer</p>",
+  "attempt": 1,
+  "score": null,
+  "grade": null,
+  "workflow_state": "submitted",
+  "submitted_at": "2026-02-01T12:00:00Z",
+  "late": false,
+  "missing": false
+}

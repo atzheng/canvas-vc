@@ -1,0 +1,14 @@
+{
+  "id": 1,
+  "uuid": "00000000example0000000000000000000000000",
+  "folder_id": 1,
+  "display_name": "example.txt",
+  "filename": "example.txt",
+  "content-type": "text/plain",
+  "url": "",
+  "size": 0,
+  "created_at": "2026-01-01T00:00:00Z",
+  "updated_at": "2026-01-01T00:00:00Z",
+  "locked": false,
+  "hidden": false
+}
