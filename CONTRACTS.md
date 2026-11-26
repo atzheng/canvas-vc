@@ -522,11 +522,32 @@ class ApplyResult:
     error: Exception | None
     new_ids: dict[ObjectKey, int | str]        # to write back into the tree
 
-def apply(plan: Plan, client: CanvasClient, ctx: ApplyContext, *, confirmed: set[str]) -> ApplyResult
+def apply(plan: Plan, client: CanvasClient, ctx: ApplyContext, *, confirmed: set[str],
+          writers: Mapping[Kind, Writer] | None = None) -> ApplyResult
 ```
 
-`apply` stops at the first failure and returns what it did so far. It never
-retries a write that isn't idempotent.
+`apply` stops at the first failure and returns what it did so far (`done`,
+`failed`, `error`, and `new_ids` of objects already created; `ctx.ids` is
+filled as creates happen). It never retries a write. Before the first write it
+raises `GuardBlocked` if any `Risk.needs_confirm` flag is not in `confirmed`
+(the bare flag, or `"<flag> <tree path>"` for a single object; see
+`plan.core.unconfirmed_risks`). Assignment operations also go through
+`ctx.guard.assert_allowed` just before each write.
+
+**Plug-in interface.** Type beads edit only their own files:
+- differs: `plan/<type>.py` `diff_type(base, target)`, listed in
+  `plan.core.DIFFER_MODULES` (apply order); `core.diff` moves every DELETE to
+  the end in reverse order and drops operations under `.canvas/`;
+  `plan.core.changes_between(before, after)` helps build `Operation.changes`.
+- writers: `remote/<type>.py` (`create`/`update`/`delete`, section 8), found by
+  `op.key.kind` via `apply.WRITER_MODULES`. CREATE and UPLOAD-without-`before`
+  call `create(after)`; UPDATE, UNPUBLISH, REORDER and UPLOAD-with-`before` call
+  `update(before, after)`; DELETE calls `delete(before)`.
+- A cleared value is `(old, None)` in `Operation.changes`; the writer sends an
+  explicit null for it.
+- Modules are matched by `canvas_id` first, then by `modules.yaml#<name>` key
+  (keys of repeated names are positional); that is the modules differ's job,
+  core does not care how an operation's key was chosen.
 
 ```python
 # errors.py
