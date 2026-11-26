@@ -1,0 +1,13 @@
+{
+  "id": 1,
+  "name": "Team One",
+  "description": null,
+  "is_public": false,
+  "join_level": "invitation_only",
+  "members_count": 0,
+  "group_category_id": 1,
+  "context_type": "Course",
+  "course_id": 1,
+  "role": null,
+  "leader": null
+}
