@@ -85,7 +85,11 @@ def load_yaml(text: str, source: str = "<yaml>") -> object:
         # ruamel.yaml is untyped: its load() returns Any with unknown members.
         return YAML(typ="safe").load(normalize_newlines(text))  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
     except YAMLError as e:
-        first = str(e).strip().splitlines()[0] if str(e).strip() else type(e).__name__
+        msg = str(e)
+        dup = re.search(r"found duplicate key (\".*?\"|\S+)", msg)
+        if dup:
+            raise ValidationError(f"{source}: duplicate key {dup.group(1)}") from None
+        first = msg.strip().splitlines()[0] if msg.strip() else type(e).__name__
         raise ValidationError(f"{source}: invalid YAML: {first}") from None
 
 
@@ -107,7 +111,8 @@ def load_frontmatter(text: str, source: str = "<frontmatter>") -> tuple[dict[str
             break
     else:
         raise ValidationError(f"{source}: frontmatter is not closed by a '---' line")
-    raw = load_yaml("\n".join(lines[1:end]), source)
+    # trailing "\n" matters: a final `|` block scalar keeps its last newline only with it
+    raw = load_yaml("\n".join(lines[1:end]) + "\n", source)
     if raw is None:
         raw = {}
     if not isinstance(raw, dict):

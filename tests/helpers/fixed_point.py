@@ -20,8 +20,9 @@ from collections.abc import Mapping
 from pathlib import Path
 
 from canvas_sync.config import CourseConfig
-from canvas_sync.model.base import CanvasObject, TypeSpec
+from canvas_sync.model.base import CanvasObject, FilesMetaSpec, TypeSpec
 from canvas_sync.model.course import Course, dump_tree, load_tree
+from canvas_sync.model.files import FilesMeta
 
 HASH_SEEDS = ("0", "1", "2", "12345", "4294967295")
 
@@ -39,7 +40,11 @@ def assert_course_fixed_point(course: Course, tmp_path: Path) -> dict[str, bytes
     first = dump_tree(course)
     root = Path(tempfile.mkdtemp(prefix="fixed-point-", dir=tmp_path))
     write_files(root, first)
-    second = dump_tree(load_tree(root))
+    loaded = load_tree(root)
+    # Byte-identical second dump is not enough: a lossy load/dump pair can still
+    # be stable. The loaded data must equal what went in.
+    assert loaded == course, "load_tree(dump_tree(c)) != c"
+    second = dump_tree(loaded)
     assert second == first, _describe_diff(first, second)
     _assert_canonical_bytes(first)
     return first
@@ -55,6 +60,22 @@ def assert_spec_fixed_point(
     loaded = spec.load(root, cfg)
     assert loaded == objs
     second = spec.dump(loaded, cfg)
+    assert second == first, _describe_diff(first, second)
+    _assert_canonical_bytes(first)
+    return first
+
+
+def assert_files_meta_fixed_point(
+    spec: FilesMetaSpec, meta: FilesMeta, cfg: CourseConfig, tmp_path: Path
+) -> dict[str, bytes]:
+    """FILE spec: ``dump_files_meta`` -> write -> ``load_files_meta`` returns ``meta`` (defaults,
+    rules and entries) and dumps to the same bytes again."""
+    first = spec.dump_files_meta(meta, cfg)
+    root = Path(tempfile.mkdtemp(prefix="fixed-point-files-meta-", dir=tmp_path))
+    write_files(root, first)
+    loaded = spec.load_files_meta(root, cfg)
+    assert loaded == meta, "load_files_meta(dump_files_meta(m)) != m"
+    second = spec.dump_files_meta(loaded, cfg)
     assert second == first, _describe_diff(first, second)
     _assert_canonical_bytes(first)
     return first

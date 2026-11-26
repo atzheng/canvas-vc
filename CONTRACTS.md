@@ -178,6 +178,11 @@ class FilesMetaSpec(TypeSpec, Protocol):
     def dump_files_meta(self, meta: FilesMeta, cfg: CourseConfig) -> dict[str, bytes]
 ```
 
+`assert_files_meta_fixed_point(spec, meta, cfg, tmp_path)` in
+`tests/helpers/fixed_point.py` checks `defaults`, `rules` and entries through
+`dump_files_meta`/`load_files_meta` (loaded == input, second dump identical);
+the files bead must call it.
+
 If the FILE spec has these methods, `load_tree`/`dump_tree` use them for
 `Course.files_meta` (keys of `FilesMeta.files` are tree paths such as
 `files/lectures/01.pdf`) and mirror its entries into `Course.objects`; `dump`
@@ -244,7 +249,13 @@ def normalize_body(body: str) -> str
 `key_order` orders the keys of every mapping in the document. `nested_orders`
 gives a different order for the mappings found under a key name (for example
 `{"items": ITEM_KEY_ORDER, "overrides": overrides.KEY_ORDER}` for
-`modules.yaml`), so nested objects keep their own order. `None` values in a
+`modules.yaml`), so nested objects keep their own order. `nested_orders` matches by key name
+at any depth, and nested keys it does not list inherit the parent's `key_order`.
+**None vs absent**: in the file format an absent key and `null` both mean "no
+value"; dump writes neither. Types must model "no value" as `None` and never
+give an absent field a non-None default taken from `course.yaml`; course
+defaults only supply the time part when a date-only value is parsed (and are
+resolved by the code that consumes the model, not at load). `None` values in a
 mapping are omitted. Datetimes must be zone-aware and are written with
 `format_local`. Strings are quoted whenever a plain scalar could be read back
 as anything else (YAML 1.1 and 1.2 booleans, nulls, numbers, dates, sexagesimal

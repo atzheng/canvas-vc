@@ -362,3 +362,31 @@ def test_property_line_ending_and_bom_tolerance(
     assert dump_frontmatter(*load_frontmatter(messy), ["title"]) == dump_frontmatter(
         *load_frontmatter(canonical), ["title"]
     )
+
+
+# ------------------------------------------- regression: trailing block scalar
+
+
+@pytest.mark.parametrize("value", ["0\n", "a\nb", "a\n\nb\n", "x\n  indented\ny\n"])
+def test_multiline_value_in_last_and_middle_key(value: str) -> None:
+    for data in ({"a": 1, "z": value}, {"a": value, "z": 1}, {"0": value}):
+        assert load_yaml(dump_yaml(data, [])) == data
+        meta, body = load_frontmatter(dump_frontmatter(data, "", []))
+        assert (meta, body) == (data, "")
+        meta, body = load_frontmatter(dump_frontmatter(data, "body", []))
+        assert (meta, body) == (data, "body")
+
+
+def test_regression_last_key_block_scalar_keeps_newline() -> None:
+    assert load_frontmatter(dump_frontmatter({"0": "0\n"}, "", []))[0] == {"0": "0\n"}
+
+
+def test_none_and_absent_are_the_same() -> None:
+    assert dump_yaml({"due": None}, []) == dump_yaml({}, [])
+    assert dump_frontmatter({"due": None}, "b", []) == dump_frontmatter({}, "b", [])
+    assert dump_yaml({"a": {"due": None}}, []) == dump_yaml({"a": {}}, [])
+
+
+def test_duplicate_key_error_names_key_and_source() -> None:
+    with pytest.raises(ValidationError, match=r"^pages/x\.md: duplicate key \"?title\"?$"):
+        load_frontmatter("---\ntitle: a\nx: 1\ntitle: b\n---\n", "pages/x.md")

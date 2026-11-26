@@ -17,11 +17,13 @@ from canvas_sync.config import CourseConfig
 from canvas_sync.dates import format_local, parse_local
 from canvas_sync.model.base import CanvasObject, Kind, ObjectKey, kind_for_path
 from canvas_sync.model.course import Course, dump_tree, load_tree
+from canvas_sync.model.files import FileEntry, FileRule, FileSettings, FilesMeta
 from canvas_sync.model.page import KEY_ORDER, Page
 from canvas_sync.model.roster import Roster
-from canvas_sync.model.serialize import dump_frontmatter, load_frontmatter
+from canvas_sync.model.serialize import dump_frontmatter, dump_yaml, load_frontmatter, load_yaml
 from tests.helpers.fixed_point import (
     assert_course_fixed_point,
+    assert_files_meta_fixed_point,
     assert_spec_fixed_point,
     assert_spec_normalizes,
     write_files,
@@ -160,6 +162,52 @@ def test_spec_helpers_work_for_a_type(tmp_path: Path, page_spec: _PageSpec) -> N
         cfg,
         tmp_path,
     )
+
+
+def test_none_and_absent_load_to_same_value(tmp_path: Path, page_spec: _PageSpec) -> None:
+    cfg = load_tree(tree(tmp_path, {})).config
+    a = page_spec.dump({"pages/a.md": Page(title="T", publish_at=None, published=None)}, cfg)
+    root = tree(
+        tmp_path,
+        {
+            "pages/a.md": "---\ntitle: T\npublish_at: null\npublished: null\n---\n",
+            "pages/b.md": "---\ntitle: T\n---\n",
+        },
+    )
+    loaded = page_spec.load(root, cfg)
+    assert loaded["pages/a.md"] == loaded["pages/b.md"] == Page(title="T")
+    assert page_spec.dump({"pages/a.md": loaded["pages/a.md"]}, cfg) == a
+    assert a["pages/a.md"] == b"---\ntitle: T\n---\n"
+
+
+class _FilesMetaSpec:
+    kind = Kind.FILE
+    folder = "files"
+
+    def load(self, root: Path, cfg: CourseConfig) -> dict[str, CanvasObject]:
+        return {}
+
+    def dump(self, objs: dict[str, CanvasObject], cfg: CourseConfig) -> dict[str, bytes]:
+        return {}
+
+    def load_files_meta(self, root: Path, cfg: CourseConfig) -> FilesMeta:
+        raw = load_yaml((root / "files/_meta.yaml").read_text(encoding="utf-8"))
+        return FilesMeta.model_validate({} if raw is None else raw)
+
+    def dump_files_meta(self, meta: FilesMeta, cfg: CourseConfig) -> dict[str, bytes]:
+        data = meta.model_dump(exclude_defaults=True)
+        return {"files/_meta.yaml": dump_yaml(data, ["defaults", "rules", "files"]).encode()}
+
+
+def test_files_meta_helper(tmp_path: Path) -> None:
+    cfg = load_tree(tree(tmp_path, {})).config
+    meta = FilesMeta(
+        defaults=FileSettings(published=True),
+        rules=[FileRule(match="old/**", settings=FileSettings(published=False, hidden=True))],
+        files={"files/a.pdf": FileEntry(canvas_id=7, path="a.pdf", sha256="ab" * 32)},
+    )
+    assert_files_meta_fixed_point(_FilesMetaSpec(), meta, cfg, tmp_path)  # type: ignore[arg-type]
+    assert_files_meta_fixed_point(_FilesMetaSpec(), FilesMeta(), cfg, tmp_path)  # type: ignore[arg-type]
 
 
 def test_fixed_point_helper_catches_instability(tmp_path: Path, page_spec: _PageSpec) -> None:
