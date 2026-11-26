@@ -110,14 +110,24 @@ def get_token(cfg: CourseConfig) -> str   # raises ConfigError if the env var is
 
 ```python
 # dates.py
-LocalDT = datetime        # always timezone-aware, in the course zone, seconds = 0
+LocalDT = datetime        # always timezone-aware, in the course zone, microseconds = 0
 
 def parse_local(value: str | date | datetime, tz: ZoneInfo, default_time: time) -> LocalDT
-    # accepts "YYYY-MM-DD", "YYYY-MM-DD HH:MM", date, datetime
-def format_local(dt: LocalDT) -> str          # always "YYYY-MM-DD HH:MM"
+    # accepts "YYYY-MM-DD", "YYYY-MM-DD HH:MM", "YYYY-MM-DD HH:MM:SS", date, datetime;
+    # any other type raises ValidationError
+def format_local(dt: LocalDT) -> str
+    # "YYYY-MM-DD HH:MM" when seconds == 0, else "YYYY-MM-DD HH:MM:SS" (deterministic)
 def to_canvas(dt: LocalDT | None) -> str | None    # UTC ISO 8601 "...Z"
 def from_canvas(s: str | None, tz: ZoneInfo) -> LocalDT | None
+def is_ambiguous_local(dt: LocalDT) -> bool   # wall time occurs twice (fall-back hour)
 ```
+
+Known limitation: during the fall-back hour (e.g. 2025-11-02 01:30 in
+Vancouver) the written local time does not say which of the two occurrences
+is meant. `parse_local` always picks the first (fold=0), so a fetched
+second-occurrence time (09:30Z) re-parses as 08:30Z. The format is unchanged;
+`is_ambiguous_local` lets fetch/validate warn. Compare round trips via
+`to_canvas` strings, since datetime `==` ignores fold.
 
 Which default time to use: `due` uses `defaults.assignment.due_time`.
 `unlock`, `publish_at` and `post_at` use `defaults.unlock_time`. `lock` uses
