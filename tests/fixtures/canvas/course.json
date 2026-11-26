@@ -1,0 +1,15 @@
+{
+  "id": 1,
+  "name": "Intro to Examples",
+  "course_code": "EX101",
+  "workflow_state": "available",
+  "account_id": 1,
+  "start_at": "2026-01-05T00:00:00Z",
+  "end_at": "2026-05-15T00:00:00Z",
+  "time_zone": "America/New_York",
+  "default_view": "modules",
+  "is_public": false,
+  "public_syllabus": false,
+  "syllabus_body": null,
+  "term": null
+}
