@@ -1,0 +1,14 @@
+{
+  "id": 1,
+  "name": "course files",
+  "full_name": "course files",
+  "context_id": 1,
+  "context_type": "Course",
+  "parent_folder_id": null,
+  "created_at": "2026-01-01T00:00:00Z",
+  "updated_at": "2026-01-01T00:00:00Z",
+  "locked": false,
+  "hidden": false,
+  "folders_count": 0,
+  "files_count": 0
+}

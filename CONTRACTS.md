@@ -654,9 +654,28 @@ to `canvas/main`. There's no separate write-back commit.
   is exercised). It records every request in `fake.log`.
 - Each resource lives in its own module (`tests/fake_canvas/<resource>.py`),
   registered by `core.py` from the start. Reader beads add GET behaviour,
-  and writer beads add POST/PUT/DELETE behaviour in that module only.
-- Writes the fake receives for endpoints outside §7 fail the test, which
-  mirrors the allowlist.
+  and writer beads add POST/PUT/DELETE behaviour in that module only. A
+  module's `register(fake)` calls `fake.route(method, regex, handler)`
+  (`{c}` in the regex is the course id; the regex is full-matched against the
+  decoded path relative to `/api/v1`; `api=False` routes match raw non-API paths on
+  any host, for downloads; a non-GET outside `/api/v1/` is refused unless the
+  route has `upload_target=True`, as for upload step 2). A handler takes a `Req`
+  (`.params`, `.body`, `.match`) and returns a list (paginated by the fake), a
+  JSON value or an `httpx.Response`, or raises `CanvasError(status, msg)`.
+  Module routes override core defaults. Modules keep data in
+  `fake.state("<name>")`, take ids from `fake.next_id()` and sanitize HTML
+  with `fake.sanitize()`.
+- Core helpers: `fake.client(mode)` (a `CanvasClient` on the fake; sleeps go to
+  `fake.sleeps`), `add_section/add_user/add_group_category/add_group/
+  add_folder/add_file`, `seed_submissions(assignment_id, subs)`,
+  `snapshot_submissions()` / `assert_submissions_intact(snap)` (submissions
+  live in `fake.submissions` and only seeding writes them), fault injection
+  `fail(status, method=, path=, times=, exc=)` and `throttle(times, status=,
+  retry_after=)`, `max_per_page` (set small to force pagination),
+  `rate_limit_remaining`. `fake.log` holds `LoggedRequest(method, path,
+  params, body, request)` with `path` relative to `/api/v1`.
+- A non-GET the fake has no route for, or one the allowlist would refuse,
+  raises `FakeCanvasError` (an `AssertionError`); an unknown GET answers 404.
 - `tests/integration/` runs only with `CANVAS_SANDBOX_URL`,
   `CANVAS_SANDBOX_COURSE`, `CANVAS_TOKEN` set (pytest marker `integration`,
   skipped by default). The safety suite seeds a test student's submissions
