@@ -118,3 +118,59 @@ def test_objectkey_used() -> None:
     c.ids = lambda k: seen.append(k)  # type: ignore[assignment,return-value]
     to_canvas_url("../assignments/hw1.md", c)
     assert seen == [ObjectKey(Kind.ASSIGNMENT, "assignments/hw1.md")]
+
+
+def test_currency_and_number_rules() -> None:
+    assert "equation_image" not in md_to_html("$5-$10", ctx())
+    assert "equation_image" not in md_to_html("a $x$1", ctx())
+    assert "equation_image" in md_to_html("a $x$ b", ctx())
+
+
+def test_query_carried() -> None:
+    c = ctx()
+    assert to_canvas_url("syl.md?x=1#h", c) == "/courses/7/pages/syllabus?x=1#h"
+    f = "../files/lectures/01%20intro.pdf?v=2"
+    assert to_canvas_url(f, c) == "/courses/7/files/33?wrap=1&v=2"
+    assert from_canvas_url("/courses/7/files/33?wrap=1&v=2", c) == (
+        "../files/lectures/01%20intro.pdf?v=2"
+    )
+    assert from_canvas_url("/courses/7/pages/syllabus?x=1", c) == "syl.md?x=1"
+
+
+def test_display_math_whitespace_stripped() -> None:
+    html = md_to_html("$$\n\\frac{a}{b}\n$$\n", ctx())
+    assert "%250A" not in html and "\n\\" not in html
+    assert 'data-equation-content="\\frac{a}{b}"' in html
+    assert 'title="\\frac{a}{b}"' in html
+
+
+def test_raw_html_links() -> None:
+    r = md_to_html_report(
+        '<p><a href="../assignments/hw1.md">h</a> <img src="x.png"> <a href="https://e.com">e</a></p>\n',
+        ctx(),
+    )
+    assert 'href="/courses/7/assignments/11"' in r.html
+    assert 'src="x.png"' in r.html
+    assert 'href="https://e.com"' in r.html
+    assert r.missing_links == ["x.png"]
+    r2 = md_to_html_report('inline <a href="syl.md">s</a>', ctx())
+    assert 'href="/courses/7/pages/syllabus"' in r2.html
+
+
+def test_unresolved_vs_missing() -> None:
+    c = ctx()
+    c.exists = lambda p: p == "assignments/new.md"
+    r = md_to_html_report("[n](../assignments/new.md) [m](../assignments/nope.md)", c)
+    assert r.unresolved_links == ["../assignments/new.md"]
+    assert r.missing_links == ["../assignments/nope.md"]
+
+
+def test_double_dollar_one_block() -> None:
+    html = md_to_html("$$x$$ text $$y$$\n", ctx())
+    assert html.count("<img ") == 1
+    assert 'data-equation-content="x$$ text $$y"' in html
+
+
+def test_pipe_in_table_math() -> None:
+    html = md_to_html("|a|b|\n|-|-|\n|$|x\\|$|2|\n", ctx())
+    assert "<table>" in html and html.count("<td>") == 2

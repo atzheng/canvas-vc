@@ -18,6 +18,7 @@ import posixpath
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Literal
 from urllib.parse import quote, unquote, urlsplit
 
 from canvas_sync.model.base import Kind, ObjectKey, kind_for_path
@@ -29,6 +30,9 @@ class LinkContext:
     from_path: str  # tree path of the document being rendered
     ids: Callable[[ObjectKey], int | str | None]  # tree path -> canvas id
     paths: Callable[[Kind, int | str], str | None]  # canvas id -> tree path
+    # tree path -> does the local object exist (even without a canvas_id yet)?
+    # None: unknown, so an id-less target is reported as missing, not unresolved.
+    exists: Callable[[str], bool] | None = None
 
 
 _FOLDER_URL = {
@@ -46,34 +50,61 @@ def is_relative_ref(url: str) -> bool:
     return bool(url) and not url.startswith(("/", "#", "?")) and not _SCHEME.match(url)
 
 
-def to_canvas_url(rel: str, ctx: LinkContext, *, image: bool = False) -> str | None:
-    """Canvas URL for relative path ``rel``; None if the target is unknown/unmappable.
+@dataclass(frozen=True)
+class Resolution:
+    """Outcome of resolving a relative link.
 
-    ``image`` selects the ``/preview`` form for files (used for ``![](...)``).
+    ``status``: ``ok`` (url set), ``missing`` (no such local object) or
+    ``unresolved`` (the object exists locally but has no Canvas id yet; push
+    renders again after creating objects, so it gets filled in).
     """
+
+    status: Literal["ok", "missing", "unresolved"]
+    url: str | None = None
+
+
+def resolve_relative(rel: str, ctx: LinkContext, *, image: bool = False) -> Resolution:
     if not is_relative_ref(rel):
-        return None
+        return Resolution("missing")
     parts = urlsplit(rel)
     frag = f"#{parts.fragment}" if parts.fragment else ""
     base = posixpath.dirname(ctx.from_path)
     target = posixpath.normpath(posixpath.join(base, unquote(parts.path)))
     if target.startswith("../") or target == "..":
-        return None
+        return Resolution("missing")
     try:
         kind = kind_for_path(target)
     except ValueError:
-        return None
+        return Resolution("missing")
     if kind not in _FOLDER_URL:
-        return None
+        return Resolution("missing")
     cid = ctx.ids(ObjectKey(kind, target))
     if cid is None:
-        return None
+        if ctx.exists is not None and ctx.exists(target):
+            return Resolution("unresolved")
+        return Resolution("missing")
     root = f"/courses/{ctx.course_id}/{_FOLDER_URL[kind]}/"
+    query = parts.query
     if kind is Kind.PAGE:
-        return f"{root}{quote(str(cid), safe='')}{frag}"
-    if kind is Kind.FILE:
-        return f"{root}{cid}/preview{frag}" if image else f"{root}{cid}?wrap=1{frag}"
-    return f"{root}{cid}{frag}"
+        path = f"{root}{quote(str(cid), safe='')}"
+    elif kind is Kind.FILE:
+        if image:
+            path = f"{root}{cid}/preview"
+        else:
+            path = f"{root}{cid}"
+            query = "wrap=1" + (f"&{query}" if query else "")
+    else:
+        path = f"{root}{cid}"
+    return Resolution("ok", path + (f"?{query}" if query else "") + frag)
+
+
+def to_canvas_url(rel: str, ctx: LinkContext, *, image: bool = False) -> str | None:
+    """Canvas URL for relative path ``rel``; None if missing or not yet created.
+
+    ``image`` selects the ``/preview`` form for files (used for ``![](...)``).
+    A ``?query`` and ``#fragment`` on ``rel`` are carried through.
+    """
+    return resolve_relative(rel, ctx, image=image).url
 
 
 def from_canvas_url(url: str, ctx: LinkContext) -> str | None:
@@ -107,4 +138,7 @@ def from_canvas_url(url: str, ctx: LinkContext) -> str | None:
     base = posixpath.dirname(ctx.from_path) or "."
     rel = posixpath.relpath(tree, base)
     frag = f"#{parts.fragment}" if parts.fragment else ""
-    return quote(rel, safe="/._-~") + frag
+    query = parts.query
+    if kind is Kind.FILE and not extra:
+        query = "&".join(q for q in query.split("&") if q and q != "wrap=1")
+    return quote(rel, safe="/._-~") + (f"?{query}" if query else "") + frag
