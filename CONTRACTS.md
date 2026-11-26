@@ -532,7 +532,15 @@ filled as creates happen). It never retries a write. Before the first write it
 raises `GuardBlocked` if any `Risk.needs_confirm` flag is not in `confirmed`
 (the bare flag, or `"<flag> <tree path>"` for a single object; see
 `plan.core.unconfirmed_risks`). Assignment operations also go through
-`ctx.guard.assert_allowed` just before each write.
+`ctx.guard.assert_allowed` **twice**: a pre-flight pass over every guarded
+operation before the first write (a refusal raises `GuardBlocked` with nothing
+written), then again immediately before each guarded write, for live state.
+`assert_allowed` must therefore be idempotent. An operation is guarded
+(`apply.needs_guard`) if its key kind is ASSIGNMENT, or if `Operation.touches_assignment`
+is set; module differs set it on ops that change `published` on, or add or
+remove, an item whose content is an assignment. A `GuardBlocked` in the
+just-in-time pass is returned in `ApplyResult.error` (with `done`/`failed`), not
+raised; the push CLI must report it as a stop, not a crash.
 
 **Plug-in interface.** Type beads edit only their own files:
 - differs: `plan/<type>.py` `diff_type(base, target)`, listed in
@@ -543,6 +551,9 @@ raises `GuardBlocked` if any `Risk.needs_confirm` flag is not in `confirmed`
   `op.key.kind` via `apply.WRITER_MODULES`. CREATE and UPLOAD-without-`before`
   call `create(after)`; UPDATE, UNPUBLISH, REORDER and UPLOAD-with-`before` call
   `update(before, after)`; DELETE calls `delete(before)`.
+- Differs must emit a same-key replacement (a page rename that keeps its
+  slug, a file replaced at the same path) as UPDATE or UPLOAD-with-`before`,
+  never as DELETE + CREATE, because deletes run last.
 - A cleared value is `(old, None)` in `Operation.changes`; the writer sends an
   explicit null for it.
 - Modules are matched by `canvas_id` first, then by `modules.yaml#<name>` key

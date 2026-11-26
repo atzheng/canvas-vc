@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import io
 from datetime import datetime
 from typing import Any, cast
@@ -59,10 +60,11 @@ class FakeGuard:
     def __init__(self) -> None:
         self.seen: list[str] = []
         self.block: str | None = None
+        self.block_on_call: int | None = None
 
     def assert_allowed(self, o: Operation, confirmed: set[str]) -> None:
         self.seen.append(o.key.path)
-        if o.key.path == self.block:
+        if o.key.path == self.block or len(self.seen) == self.block_on_call:
             raise GuardBlocked("blocked")
 
 
@@ -289,17 +291,55 @@ def test_risk_with_no_flag_does_not_block() -> None:
     assert res.error is None
 
 
-def test_guard_runs_for_assignments_and_blocks_write() -> None:
-    plan = Plan(
+def _guard_plan() -> Plan:
+    mod = dataclasses.replace(
+        op(Kind.MODULE, "modules.yaml#M", Action.UPDATE), touches_assignment=True
+    )
+    return Plan(
         [
             op(Kind.PAGE, "pages/a.md", Action.CREATE),
             op(Kind.ASSIGNMENT, "assignments/hw1.md", Action.DELETE),
-            op(Kind.ASSIGNMENT, "assignments/hw2.md", Action.UPDATE),
+            mod,
+            op(Kind.MODULE, "modules.yaml#N", Action.UPDATE),
         ]
     )
+
+
+def test_guard_preflight_blocks_with_nothing_written() -> None:
     log: list[str] = []
     guard = FakeGuard()
     guard.block = "assignments/hw1.md"
+    with pytest.raises(GuardBlocked):
+        apply(
+            _guard_plan(),
+            cast(Any, None),
+            make_ctx(guard),
+            confirmed=set(),
+            writers={k: FakeWriter(log) for k in Kind},
+        )
+    assert log == []
+
+
+def test_guard_runs_twice_for_guarded_ops_only() -> None:
+    log: list[str] = []
+    guard = FakeGuard()
+    res = apply(
+        _guard_plan(),
+        cast(Any, None),
+        make_ctx(guard),
+        confirmed=set(),
+        writers={k: FakeWriter(log) for k in Kind},
+    )
+    assert res.error is None
+    # hw1 (assignment) and module M (touches an assignment); module N is not guarded
+    assert guard.seen == ["assignments/hw1.md", "modules.yaml#M"] * 2
+
+
+def test_guard_just_in_time_block_returned_not_raised() -> None:
+    log: list[str] = []
+    guard = FakeGuard()
+    guard.block_on_call = 3  # passes pre-flight, refuses the live check of hw1
+    plan = _guard_plan()
     res = apply(
         plan,
         cast(Any, None),
@@ -309,8 +349,33 @@ def test_guard_runs_for_assignments_and_blocks_write() -> None:
     )
     assert isinstance(res.error, GuardBlocked)
     assert res.failed is plan.ops[1]
-    assert log == ["create pages/a.md"]  # the blocked delete never reached the writer
-    assert guard.seen == ["assignments/hw1.md"]
+    assert log == ["create pages/a.md"]
+
+
+def test_all_missing_confirmations_listed() -> None:
+    r1 = Risk(RiskKind.GRADING_CHANGE, "points change", "--confirm-grading-change")
+    r2 = Risk(RiskKind.NOTIFIES_STUDENTS, "emails students", "--confirm-notify")
+    plan = Plan(
+        [
+            op(Kind.ASSIGNMENT, "assignments/a.md", Action.UPDATE, (r1,)),
+            op(Kind.ANNOUNCEMENT, "announcements/n.md", Action.CREATE, (r2,)),
+        ]
+    )
+    with pytest.raises(GuardBlocked) as e:
+        apply(plan, cast(Any, None), make_ctx(FakeGuard()), confirmed=set(), writers={})
+    assert "--confirm-grading-change" in str(e.value) and "--confirm-notify" in str(e.value)
+
+
+def test_render_long_values_truncated_old_to_new() -> None:
+    o = Operation(
+        key(Kind.PAGE, "pages/a.md"),
+        Action.UPDATE,
+        Page(),
+        Page(),
+        {"body": ("o" * 50, "n" * 50)},
+    )
+    out = render_text(Plan([o]))
+    assert "body " + "o" * 30 + "\u2026 \u2192 " + "n" * 30 + "\u2026" in out
 
 
 def test_ctx_ids_filled_for_later_ops() -> None:

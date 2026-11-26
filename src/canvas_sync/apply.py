@@ -50,8 +50,11 @@ WRITER_MODULES: dict[Kind, str] = {
     Kind.MODULE: "canvas_sync.remote.modules",
 }
 
-# Kinds whose operations go through the submission guard before each write.
-GUARDED_KINDS = frozenset({Kind.ASSIGNMENT})
+
+def needs_guard(op: Operation) -> bool:
+    """Operations that go through the submission guard: assignment operations
+    and module operations that touch an assignment item."""
+    return op.key.kind is Kind.ASSIGNMENT or op.touches_assignment
 
 
 @dataclass
@@ -97,7 +100,8 @@ def apply(
     """Stop at the first failure; never retry a write that is not idempotent.
 
     Raises ``GuardBlocked`` before any write if a risk needs a confirmation
-    flag that is not in ``confirmed``. After that, any exception from the
+    flag that is not in ``confirmed`` (all are listed), or if the guard
+    refuses any guarded operation in the pre-flight pass. After that, any exception from the
     guard or a writer ends the run and is returned in ``ApplyResult.error``,
     with the operations already done and the ids of objects already created.
     A failed operation is never re-sent: the HTTP client retries only what is
@@ -106,13 +110,18 @@ def apply(
     """
     missing = unconfirmed_risks(plan, confirmed)
     if missing:
-        op, risk = missing[0]
-        raise GuardBlocked(f"{op.key.path}: {risk.message}; needs {risk.needs_confirm}")
+        raise GuardBlocked(
+            "; ".join(f"{o.key.path}: {r.message} (needs {r.needs_confirm})" for o, r in missing)
+        )
+    # Pre-flight: nothing is written if the guard refuses any operation.
+    for op in plan.ops:
+        if needs_guard(op):
+            ctx.guard.assert_allowed(op, confirmed)
 
     result = ApplyResult(done=[], failed=None, error=None)
     for op in plan.ops:
         try:
-            if op.key.kind in GUARDED_KINDS:
+            if needs_guard(op):  # just-in-time, for live state
                 ctx.guard.assert_allowed(op, confirmed)
             new_id = _run(op, _writer(op.key.kind, writers), client, ctx)
         except Exception as e:

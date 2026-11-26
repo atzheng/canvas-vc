@@ -56,6 +56,7 @@ class Operation:
     after: CanvasObject | None
     changes: dict[str, tuple[Any, Any]]  # field -> (old, new), for display
     risks: tuple[Risk, ...] = ()
+    touches_assignment: bool = False  # module ops: published/item change on an assignment item
 
 
 Differ = Callable[[Course, Course], list[Operation]]
@@ -210,8 +211,19 @@ def _fmt(v: Any) -> str:
         return "(none)"
     if hasattr(v, "strftime"):
         return str(v.strftime("%Y-%m-%d %H:%M"))
-    s = str(v)
-    return "(changed)" if len(s) > 40 or "\n" in s else s
+    return str(v)
+
+
+def _short(v: Any, n: int = 30) -> str:
+    s = _fmt(v).replace("\n", " ")
+    return s if len(s) <= n else s[:n] + "\u2026"
+
+
+def _change_text(field: str, old: Any, new: Any) -> str:
+    long = len(_fmt(new)) > 40 or "\n" in _fmt(new) or len(_fmt(old)) > 40 or "\n" in _fmt(old)
+    if long:
+        return f"{field} {_short(old)} \u2192 {_short(new)}"
+    return f"{field} {_fmt(new)}"
 
 
 def _changes_text(op: Operation) -> str:
@@ -219,4 +231,4 @@ def _changes_text(op: Operation) -> str:
         return "unpublish"
     if op.action is Action.DELETE:
         return ""
-    return "  ".join(f"{f} {_fmt(new)}" for f, (_old, new) in op.changes.items())
+    return "  ".join(_change_text(f, old, new) for f, (old, new) in op.changes.items())
