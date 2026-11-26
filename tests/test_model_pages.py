@@ -127,3 +127,44 @@ def test_dump_independent_of_dict_order(cfg: CourseConfig) -> None:
 def test_missing_folder_loads_empty(cfg: CourseConfig, tmp_path: Path) -> None:
     assert PAGE_SPEC.load(tmp_path, cfg) == {}
     assert ANNOUNCEMENT_SPEC.load(tmp_path, cfg) == {}
+
+
+@pytest.mark.parametrize(
+    ("spec", "folder"), [(PAGE_SPEC, "pages"), (ANNOUNCEMENT_SPEC, "announcements")]
+)
+@pytest.mark.parametrize("name", ["old/x.md", "x.markdown", "x.MD", "x.txt"])
+def test_unexpected_entries_rejected(
+    spec: TypeSpec, folder: str, name: str, cfg: CourseConfig, tmp_path: Path
+) -> None:
+    write_files(tmp_path, {f"{folder}/{name}": "---\ntitle: X\n---\n"})
+    with pytest.raises(ValidationError, match=rf"{folder}/{name.split('/')[0]}"):
+        spec.load(tmp_path, cfg)
+
+
+def test_hidden_entries_skipped(cfg: CourseConfig, tmp_path: Path) -> None:
+    write_files(tmp_path, {"pages/.DS_Store": "x", "pages/.hidden/y.md": "z"})
+    assert PAGE_SPEC.load(tmp_path, cfg) == {}
+
+
+def test_duplicate_canvas_id_rejected(cfg: CourseConfig, tmp_path: Path) -> None:
+    write_files(
+        tmp_path,
+        {
+            "pages/a.md": "---\ncanvas_id: s\n---\n",
+            "pages/b.md": "---\ncanvas_id: s\n---\n",
+            "announcements/a.md": "---\ncanvas_id: 7\n---\n",
+            "announcements/b.md": '---\ncanvas_id: "7"\n---\n',
+        },
+    )
+    with pytest.raises(ValidationError, match=r"pages/b\.md.*pages/a\.md"):
+        PAGE_SPEC.load(tmp_path, cfg)
+    with pytest.raises(ValidationError, match=r"announcements/b\.md.*announcements/a\.md"):
+        ANNOUNCEMENT_SPEC.load(tmp_path, cfg)
+
+
+def test_announcement_canvas_id_string_coerced(cfg: CourseConfig, tmp_path: Path) -> None:
+    write_files(tmp_path, {"announcements/a.md": '---\ncanvas_id: "776655"\n---\n'})
+    assert ANNOUNCEMENT_SPEC.load(tmp_path, cfg)["announcements/a.md"].canvas_id == 776655
+    write_files(tmp_path, {"announcements/a.md": "---\ncanvas_id: abc\n---\n"})
+    with pytest.raises(ValidationError, match=r"announcements/a\.md"):
+        ANNOUNCEMENT_SPEC.load(tmp_path, cfg)

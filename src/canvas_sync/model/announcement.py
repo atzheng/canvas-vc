@@ -33,6 +33,11 @@ def _parse(text: str, source: str, cfg: CourseConfig) -> Announcement:
     meta = {k: v for k, v in meta.items() if v is not None}
     if "post_at" in meta:
         meta["post_at"] = parse_local(meta["post_at"], cfg.tz, cfg.defaults.unlock_time)
+    cid = meta.get("canvas_id")
+    if isinstance(cid, str):
+        if not cid.strip().isdigit():
+            raise ValidationError(f"{source}: canvas_id {cid!r} is not an integer")
+        meta["canvas_id"] = int(cid)
     try:
         return Announcement(body=body, **meta)
     except PydanticValidationError as e:
@@ -46,9 +51,25 @@ class _Spec:
 
     def load(self, root: Path, cfg: CourseConfig) -> dict[str, CanvasObject]:
         out: dict[str, CanvasObject] = {}
-        for p in sorted((root / self.folder).glob("*.md")):
+        seen: dict[object, str] = {}
+        folder = root / self.folder
+        entries = sorted(folder.iterdir()) if folder.is_dir() else []
+        for p in entries:
+            if p.name.startswith("."):
+                continue
             rel = f"{self.folder}/{p.name}"
-            out[rel] = _parse(p.read_text(encoding="utf-8"), rel, cfg)
+            if not (p.is_file() and p.suffix == ".md"):
+                raise ValidationError(
+                    f"{rel}: only top-level .md files are allowed in {self.folder}/"
+                )
+            obj = _parse(p.read_text(encoding="utf-8"), rel, cfg)
+            if obj.canvas_id is not None:
+                if obj.canvas_id in seen:
+                    raise ValidationError(
+                        f"{rel}: duplicate canvas_id {obj.canvas_id!r} (also in {seen[obj.canvas_id]})"  # noqa: E501
+                    )
+                seen[obj.canvas_id] = rel
+            out[rel] = obj
         return out
 
     def dump(self, objs: dict[str, CanvasObject], cfg: CourseConfig) -> dict[str, bytes]:
