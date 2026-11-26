@@ -161,6 +161,10 @@ REGISTRY: dict[Kind, TypeSpec]
 ```
 
 `load` returns objects keyed by tree path, in on-Canvas order for modules.
+A `load` must raise `ValidationError` (one line, naming both paths) when two objects
+of its type carry the same `canvas_id`. Folder-per-type loads (pages, announcements)
+also raise for any non-hidden entry that is not a top-level `*.md` file, so a moved
+file can never look like a deletion.
 `dump` returns `{tree path: exact bytes}` for the files the type owns, must not
 depend on dict order of its input, and must satisfy
 `dump(load(dump(objs))) == dump(objs)`; `tests/helpers/fixed_point.py`
@@ -206,7 +210,7 @@ Per-type fields (frontmatter key = field name unless noted; all dates `LocalDT |
 - `Page`: `title, published, publish_at, front_page: bool = False, body_format: Literal["md","html"] = "md", body`
 - `Announcement`: `title, post_at, published: bool = True, body_format, body`
 - `Assignment`: `title, points: float | None, group: str | None, submission_types, allowed_extensions: list[str] = [], grading_type: str = "points", omit_from_final_grade = False, published, unlock, due, lock, assign_to_overrides_only = False, overrides: list[Override] = [], body_format, body`
-- `Override` (`model/overrides.py`): exactly one of `section: str`, `group: str`, `students: list[str]` (sorted), plus `title: str | None, unlock, due, lock`. Canonical order: sections by name, then groups by name, then student sets by first student.
+- `Override` (`model/overrides.py`): exactly one of `section: str`, `group: str`, `students: list[str]` (sorted), plus `title: str | None, unlock, due, lock`. Canonical order: sections by name, then groups by name, then student sets by first student. Overrides have no `canvas_id` in files, so readers and differs match existing Canvas overrides by target (section, group or student set). A section or group appears at most once, and a student in at most one student-set override.
 - `FileEntry` (`model/files.py`): `path, canvas_id, sha256, published, hidden, unlock, lock, stable_link = False`. `FilesMeta` holds `defaults`, `rules: list[FileRule]` and `files: dict[path, FileEntry]` (only ids, hashes and settings that differ from what the rules give). `effective(path) -> FileSettings` applies defaults, then rules, then the per-file entry.
 - `Module` (`model/modules.py`): `name, canvas_id, published, unlock, overrides: list[Override] (unlock only), items: list[ModuleItem]`. `ModuleItem`: exactly one of `page | assignment | file | header | url | quiz | discussion` (the last two are `{canvas_id: int}`, for unmanaged objects), plus `title, indent: int = 0, new_tab = False, published: bool | None, canvas_id`.
   Details: `page`/`assignment` are local paths without type folder or extension, `file` is relative to `files/` (no leading `/`, no `..`); `url` must be http(s). `canvas_id` of modules and items is `int | None`; **always write it once known**, because `dump_tree` keys same-named modules positionally (`modules.yaml#<name>#2`), so renaming or reordering one of two same-named modules re-keys the other and plan/differ must match by `canvas_id` first. Module overrides use a local `ModuleOverride` (`section | group | students`, `title`, `unlock`; canonical order as for `Override`), which may be unified with `Override` later. `modules.yaml` is written only when there are modules; module and item order is exactly list order. Models raise pydantic `ValidationError` on construction (item with zero or several types, bad ref shape); `load` converts it to `errors.ValidationError` with `modules.yaml: [i].items[j]...` in the message. Duplicate `canvas_id`s within `modules.yaml` are rejected.
@@ -309,7 +313,8 @@ class LinkContext:
     from_path: str                                 # tree path of the document being rendered
     ids: Callable[[ObjectKey], int | str | None]   # tree path -> canvas id
     paths: Callable[[Kind, int | str], str | None] # canvas id -> tree path
-def to_canvas_url(rel: str, ctx: LinkContext) -> str | None
+    exists: Callable[[str], bool] | None = None    # tree path -> local object exists (id or not)
+def to_canvas_url(rel: str, ctx: LinkContext, *, image: bool = False) -> str | None
 def from_canvas_url(url: str, ctx: LinkContext) -> str | None
 ```
 
@@ -317,6 +322,18 @@ URL forms: page `/courses/{c}/pages/{slug}`, assignment
 `/courses/{c}/assignments/{id}`, announcement
 `/courses/{c}/discussion_topics/{id}`, file link
 `/courses/{c}/files/{id}?wrap=1`, image `/courses/{c}/files/{id}/preview`.
+`?query` and `#fragment` on a relative link are carried through.
+
+`render/md2html.py` also has `md_to_html_report(md, ctx) -> RenderResult(html,
+missing_links, unresolved_links)`. `missing_links`: no such local object (an
+error for `validate`/push). `unresolved_links`: the object exists locally but
+has no canvas_id yet (needs `ctx.exists`). Push renders again after creating
+new objects, so unresolved links get filled in. Links are also rewritten in
+raw HTML `<a href>` / `<img src>`.
+
+Pinned `pygments>=2.21,<2.22`: code blocks use inline styles, which feed the
+`.canvas/bodies.json` hashes, so changing the pygments version requires a body
+re-baseline (re-render and re-record all bodies).
 
 ```python
 # render/bodies.py   — .canvas/bodies.json: {tree_path: {"html_sha256": str, "md_sha256": str}}
