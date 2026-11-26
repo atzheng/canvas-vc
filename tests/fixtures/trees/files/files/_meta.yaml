@@ -1,0 +1,10 @@
+defaults:
+  published: true
+rules:
+  - match: "lectures/*.pdf"
+    hidden: true
+  - match: "solutions/hw1-*"
+    unlock: 2026-09-19
+files:
+  lectures/01-linear-models.pdf: {canvas_id: 5551212, sha256: "aa"}
+  solutions/hw1-solutions.ipynb: {sha256: "bb", canvas_id: 5551299, lock: 2026-12-20 23:59, unlock: 2026-09-19 09:00, hidden: false}
