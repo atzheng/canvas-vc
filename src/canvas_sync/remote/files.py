@@ -27,6 +27,7 @@ import json
 import os
 import tempfile
 import unicodedata
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
@@ -38,8 +39,9 @@ from canvas_sync.dates import from_canvas, to_canvas
 from canvas_sync.errors import CanvasAPIError, CanvasSyncError, StaleRemote
 from canvas_sync.model.base import CanvasObject, Kind, ObjectKey
 from canvas_sync.model.files import FileEntry, FileSettings, FilesMeta
+from canvas_sync.plan.core import Action, Operation
 from canvas_sync.plan.files import PlacedFile, canvas_settings
-from canvas_sync.progress import NullProgress, Progress
+from canvas_sync.progress import Progress, safe
 from canvas_sync.remote.context import ApplyContext, FetchContext
 from canvas_sync.remote.http import CanvasClient
 
@@ -246,7 +248,7 @@ def read_files_meta(
     ``ctx.previous`` (people edit those); ``files`` holds only ids, hashes,
     ``stable_link`` and the settings that differ from what the rules give."""
     prev_meta = ctx.previous.files_meta if ctx.previous else FilesMeta()
-    progress = progress or NullProgress()
+    progress = safe(progress)
     progress.phase("files")
     remote, ignored_ids = _list_remote(client, ctx)
     progress.phase("files", len(remote))
@@ -432,9 +434,8 @@ def _upload(client: CanvasClient, ctx: ApplyContext, entry: FileEntry) -> dict[s
     did not overwrite)."""
     tree = _tree_path(entry)
     name = _basename(entry)
-    result = client.upload_file(
-        _upload_folder(ctx, entry), name, _content(ctx, entry), on_duplicate="overwrite"
-    )
+    data = _content(ctx, entry)
+    result = client.upload_file(_upload_folder(ctx, entry), name, data, on_duplicate="overwrite")
     fid = result.get("id")
     if not isinstance(fid, int) or isinstance(fid, bool):
         raise CanvasAPIError(0, f"{tree}: upload returned no file id")
@@ -442,7 +443,28 @@ def _upload(client: CanvasClient, ctx: ApplyContext, entry: FileEntry) -> dict[s
     if stored != name:
         raise CanvasSyncError(f"{tree}: Canvas stored the upload as {stored!r}; check the course")
     ctx.ids[ObjectKey(Kind.FILE, tree)] = fid
+    ctx.upload_done += len(data)
+    safe(ctx.progress).bytes(ctx.upload_done, max(ctx.upload_total, ctx.upload_done))
     return result
+
+
+def upload_bytes(ops: Iterable[Operation], ctx: ApplyContext) -> int:
+    """Bytes the file operations in ``ops`` will upload (for progress display only; stats
+    the blob or working-tree file, reads no content, sends nothing, never raises)."""
+    total = 0
+    for op in ops:
+        if op.key.kind is not Kind.FILE or op.action is Action.DELETE or op.after is None:
+            continue
+        new = _entry(op.after)
+        if op.before is not None and _entry(op.before).sha256 == new.sha256:
+            continue
+        for path in (ctx.blobs.path_for(new.sha256), ctx.blobs.root / _tree_path(new)):
+            try:
+                total += path.stat().st_size
+                break
+            except (OSError, ValueError):
+                continue
+    return total
 
 
 def _refuse_existing(client: CanvasClient, ctx: ApplyContext, entry: FileEntry) -> None:

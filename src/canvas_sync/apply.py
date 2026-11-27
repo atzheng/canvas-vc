@@ -30,6 +30,7 @@ from typing import Protocol, cast
 from canvas_sync.errors import GuardBlocked
 from canvas_sync.model.base import CanvasObject, Kind, ObjectKey
 from canvas_sync.plan.core import Action, Operation, Plan, unconfirmed_risks
+from canvas_sync.progress import Progress, safe
 from canvas_sync.remote.context import ApplyContext
 from canvas_sync.remote.http import CanvasClient
 
@@ -103,6 +104,8 @@ def apply(
     *,
     confirmed: set[str],
     writers: Mapping[Kind, Writer] | None = None,
+    progress: Progress | None = None,
+    phase: str = "pushing",
 ) -> ApplyResult:
     """Stop at the first failure; never retry a write that is not idempotent.
 
@@ -144,7 +147,11 @@ def apply(
                 dcheck(client, op.before, ctx)
 
     result = ApplyResult(done=[], failed=None, error=None)
-    for op in plan.ops:
+    progress = safe(progress)
+    progress.phase(phase, len(plan.ops))
+    for i, op in enumerate(plan.ops, 1):
+        what = f"[{i}/{len(plan.ops)}] {op.action.value} {op.key.path}"
+        progress.advance(0, label=what)
         try:
             if needs_guard(op):  # just-in-time, for live state
                 ctx.guard.assert_allowed(op, confirmed)
@@ -164,4 +171,5 @@ def apply(
             ctx.ids[op.key] = new_id
             result.new_ids[op.key] = new_id
         result.done.append(op)
+        progress.advance(1, label=what)
     return result
