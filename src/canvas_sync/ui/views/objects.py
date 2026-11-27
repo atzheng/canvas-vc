@@ -8,10 +8,10 @@ the file system, and the roster cache is never read (overrides show names as wri
 from __future__ import annotations
 
 import posixpath
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import datetime
 from typing import Any, cast
-from urllib.parse import quote
+from urllib.parse import quote, unquote, urlsplit
 
 from markdown_it.token import Token
 
@@ -45,7 +45,8 @@ _CANVAS_SEGMENT = {
 # Raw HTML in a body cannot run (the markdown renderer has it disabled); this is a second layer.
 _CSP = (
     "Content-Security-Policy",
-    "default-src 'none'; style-src 'self'; img-src 'self' data: https:; base-uri 'none'",
+    "default-src 'none'; style-src 'self' 'unsafe-inline'; "
+    "img-src 'self' data: https:; base-uri 'none'",
 )
 
 
@@ -128,6 +129,10 @@ def _dates(obj: CanvasObject) -> str:
 # ---- body rendering ---------------------------------------------------------------------------
 
 
+def _render_math_code(self: Any, tokens: Sequence[Token], idx: int, options: Any, env: Any) -> str:
+    return f"<code>{esc(tokens[idx].content.strip())}</code>"
+
+
 def render_body(course: Course, path: str, body: str) -> str:
     """Markdown body to HTML for the UI: no raw HTML, relative links point at UI routes."""
     exists = {k.path for k in course.objects}
@@ -141,6 +146,9 @@ def render_body(course: Course, path: str, body: str) -> str:
     # rule added below resolves targets itself and rewrites them to UI routes.
     noop = LinkContext(course.config.course_id, path, lambda _k: None, lambda _k, _i: None)
     md = _make_md(noop, [], [])
+    # Math would be <img src="/equation_images/..."> (a 404 here): show the LaTeX as code.
+    for math_rule in ("math_inline", "math_inline_double", "math_block"):
+        md.add_render_rule(math_rule, _render_math_code)
     md.options["html"] = False  # raw <script>/<img onerror> in a body is shown as text
     ctx = LinkContext(course.config.course_id, path, ids, lambda _k, _i: None)
 
@@ -150,9 +158,12 @@ def render_body(course: Course, path: str, body: str) -> str:
         if res.status != "ok" or not seen:
             return None
         target = seen[-1]
-        if target.startswith("files/") and image:
+        if image:
+            if not target.startswith("files/"):
+                return None
             return "/files/raw/" + quote(target.removeprefix("files/"), safe="/")
-        return obj_href(target)
+        frag = unquote(urlsplit(href).fragment)
+        return obj_href(target) + (f"#{quote(frag, safe='')}" if frag else "")
 
     def walk(tokens: list[Token]) -> None:
         for t in tokens:

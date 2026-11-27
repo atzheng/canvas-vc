@@ -109,3 +109,19 @@ def test_titles_escaped(tmp_path: Path) -> None:
     files = {**FILES, "pages/x.md": "---\ntitle: <b>hi</b>\n---\n\nbody\n"}
     _, html = get(make_repo(tmp_path, files), "/o/pages/x.md")
     assert "<b>hi</b>" not in html and "&lt;b&gt;hi&lt;/b&gt;" in html
+
+
+def test_fragment_kept_image_to_non_file_broken_math_as_text(tmp_path: Path) -> None:
+    files = {
+        **FILES,
+        "pages/b.md": "---\ntitle: B\n---\n\n[f](syllabus.md#sec%20one) [q](syllabus.md?x=1)\n\n"
+        "![p](syllabus.md)\n\nInline $x^2$ and\n\n$$y$$\n",
+    }
+    r = dispatch(make_repo(tmp_path, files), "/o/pages/b.md")
+    html = r.body.decode()
+    assert 'href="/o/pages/syllabus.md#sec%20one"' in html
+    assert 'href="/o/pages/syllabus.md"' in html
+    assert 'src="/o/' not in html and 'src="#"' in html
+    assert "equation_images" not in html
+    assert "<code>x^2</code>" in html and "<code>y</code>" in html
+    assert "style-src 'self' 'unsafe-inline'" in dict(r.headers)["Content-Security-Policy"]
