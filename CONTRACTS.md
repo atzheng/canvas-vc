@@ -618,7 +618,21 @@ def backup(client: CanvasClient, config: CourseConfig, assignment_ids: Iterable[
 ```
 
 `push` calls `backup` for every assignment touched by the plan, before the
-first write. It aborts if the backup fails.
+first write. It aborts if the backup fails: `backup` raises
+`remote.backup.BackupError` (a `CanvasSyncError`) on any failure, including a
+backup location inside a course repo (a parent holding `course.yaml` or `.canvas/`).
+The file is mode 0600 in a 0700 directory and is never logged.
+
+Guard details: `SubmissionGuard.__init__` also takes an optional keyword-only
+`now` (clock, for tests). `check` returns live-derived risks only; `assert_allowed`
+enforces `op.risks` plus the live ones, using the same flag matching as
+`plan.core.unconfirmed_risks`, and fails closed (`GuardBlocked`) if live state cannot
+be read. Flags: `--confirm-grading-change` (GRADING_CHANGE, LATE_POLICY_REGRADE),
+`--confirm-access-removal` (ACCESS_REMOVED), `--confirm-notify` (NOTIFIES_STUDENTS).
+Hard blocks also cover: unpublishing an assignment that has submissions (Canvas
+refuses). Assignment groups are recognised by an `Operation` whose before/after
+object's class is named `AssignmentGroup`. Group-category and submission-type changes
+are read from `Operation.changes` keys (`group_category`, `submission_types`).
 
 ## 11. Git, snapshots, blobs
 
