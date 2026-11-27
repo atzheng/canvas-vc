@@ -529,6 +529,41 @@ by `.canvasignore` are dropped. Tree paths for new remote objects: `slugify(titl
 with `-2`, `-3`, ... on collision. Existing objects keep their path from
 `previous` (matched by `canvas_id`).
 
+**Pages and announcements readers** (`remote/pages.py`, `remote/announcements.py`;
+helpers in `remote/paths.py`). GET only.
+
+```python
+def read(client, ctx, *, paths: Mapping[tuple[Kind, int | str], str] | None = None) -> dict[str, CanvasObject]
+def assign_paths(client, ctx) -> dict[str, str]   # pages: url slug -> tree path (list + rename probes, no bodies)
+def assign_paths(client, ctx) -> dict[int, str]   # announcements and assignments: id -> tree path (one list call)
+```
+
+- `paths` has the same type and keys as `modules.read` (pages by url slug, assignments,
+  files and announcements by id; value = tree path). `fetch_course` does an id/path
+  pre-pass (list calls only; `assign_paths` in `pages`, `announcements` and `assignments`) and passes
+  the same complete map to every reader. When given, links in bodies resolve through it
+  alone. When `None`, they resolve through `ctx.previous` plus the objects of the kind
+  being read; previous objects of that kind that no longer exist remotely are dropped.
+- `read` returns objects keyed by tree path (it must choose paths to give `html_to_md` a
+  link context). `Page.canvas_id` is the current Canvas url slug; there is no `page_id`.
+- Path assignment: objects in `ctx.previous` keep their path, matched by `canvas_id`.
+  Pages whose slug is gone are matched through Canvas's old-slug redirect and `page_id`.
+  New objects (ascending Canvas id) get `<folder>/<slugify(title)>.md`, then `-2`, `-3`
+  on collision with already assigned paths (compared case-insensitively). Only
+  matched objects see their previous body and `body_format`; new ones never do.
+- **Known limitation:** if page A is renamed and a new page B takes A's old slug, the
+  slug match pairs the previous A with B. Needs a stored `page_id` to detect.
+- `slugify(title)`: NFKD, drop non-ASCII, lowercase, runs of non-alphanumerics become `-`,
+  strip `-`, first 80 characters, strip `-` again, `untitled` if empty (one rule for pages,
+  assignments and announcements, all through `remote/paths.py`;
+  `unique_path(folder, title, taken)` adds the suffix).
+- `previous_objects(ctx, kind)`: tree path -> previous object of that kind.
+  `link_context(ctx, from_path, read, paths=None)` builds the `LinkContext`.
+  `read_body(...)`: previous object with `body_format: html` keeps the HTML verbatim;
+  else if `ctx.bodies.matches(path, html)` (Bodies are keyed by tree path) the previous
+  Markdown is reused; else an empty body is `""`; else `html_to_md`. Results go through
+  `normalize_body`.
+
 ## 9. Plan and apply
 
 ```python
@@ -631,6 +666,19 @@ raised; the push CLI must report it as a stop, not a crash.
 - Modules are matched by `canvas_id` first, then by `modules.yaml#<name>` key
   (keys of repeated names are positional); that is the modules differ's job,
   core does not care how an operation's key was chosen.
+- Module operations (`plan/modules.py`, `remote/modules.py`). Module ops use key
+  `modules.yaml#<name>` (target key; base key for deletes), `before` the base `Module`,
+  `after` a `PlacedModule` (a `Module` plus `place`, `pred_id`, `pred_path`). Item ops use
+  key `modules.yaml#<name>/items[<j>]` (`j` = index in the target module, base index for
+  deletes) with `after` a `PlacedItem` (a `ModuleItem` plus `module_path`, `module_id`,
+  `from_module_id`, `content_path`, `content_id`, placement). `apply` puts a created item's
+  id in `ctx.ids` under that key, so **push must write item ids back to
+  `modules.yaml` by the same key** (module ids are under the module key). Order is set
+  relative to a predecessor (`place`/`pred_*`), never an absolute position: deletes run last
+  and Canvas positions shift. Only items outside the longest already-ordered run are moved.
+  Writers send JSON bodies (`{"module": {...}}`, `{"module_item": {...}}`) and look the
+  predecessor up with a live GET of the module (or item) list. New modules are created
+  unpublished and then published by a PUT; the new id is put in `ctx.ids` right after the POST. Page/assignment item titles are never sent. A local module delete never removes a module that still holds `unmanaged` items on Canvas: its managed items are deleted, the module stays, with a one-line warning. A hand-written `unmanaged` entry that carries a managed item's `canvas_id` is ignored (item kept) with a warning. The pages writer must return the str slug as its id (`_content_id` relies on it).
 
 ```python
 # errors.py

@@ -187,7 +187,12 @@ _SYMBOL = {
     Action.DELETE: ("-", "red"),
     Action.UNPUBLISH: ("-", "red"),
 }
-_NOUN = {"Override": "override", "ModuleItem": "item", "AssignmentGroup": "group"}
+_NOUN = {
+    "Override": "override",
+    "ModuleItem": "item",
+    "PlacedItem": "item",
+    "AssignmentGroup": "group",
+}
 
 
 def _noun(op: Operation) -> str:

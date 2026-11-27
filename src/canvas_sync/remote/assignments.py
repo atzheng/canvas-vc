@@ -14,7 +14,6 @@ external-tool assignments are not mirrored (they are managed elsewhere in Canvas
 from __future__ import annotations
 
 import re
-import unicodedata
 from collections.abc import Mapping
 from typing import Any, Literal, cast
 
@@ -35,6 +34,7 @@ from canvas_sync.plan.assignments import (
 from canvas_sync.plan.core import Action, Operation
 from canvas_sync.remote.context import ApplyContext, FetchContext
 from canvas_sync.remote.http import CanvasClient
+from canvas_sync.remote.paths import unique_path
 from canvas_sync.render.html2md import html_to_md
 from canvas_sync.render.links import LinkContext
 from canvas_sync.render.md2html import md_to_html
@@ -49,13 +49,6 @@ PathMap = Mapping[tuple[Kind, int | str], str]
 def _warn(message: str) -> None:
     """One-line warning on stderr. Never put a Canvas user name in ``message``."""
     Console(stderr=True).print(f"warning: {message}", markup=False, highlight=False, soft_wrap=True)
-
-
-def _slugify(title: str) -> str:
-    """Lower-case ASCII slug of ``title`` (``Homework 1: Intro!`` -> ``homework-1-intro``)."""
-    text = unicodedata.normalize("NFKD", title).encode("ascii", "ignore").decode()
-    slug = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")[:80].strip("-")
-    return slug or "untitled"
 
 
 def _int(value: Any) -> int | None:
@@ -86,7 +79,7 @@ def _assign_paths(rows: list[dict[str, Any]], ctx: FetchContext) -> dict[int, st
             for key, o in ctx.previous.objects.items()
             if key.kind == Kind.ASSIGNMENT and o.canvas_id is not None
         }
-        taken = {k.path.casefold() for k in ctx.previous.objects if k.kind == Kind.ASSIGNMENT}
+        taken = {k.path for k in ctx.previous.objects if k.kind == Kind.ASSIGNMENT}
         for row in rows:
             path = by_id.get(int(row["id"]))
             if path is not None:
@@ -95,11 +88,8 @@ def _assign_paths(rows: list[dict[str, Any]], ctx: FetchContext) -> dict[int, st
         aid = int(row["id"])
         if aid in out:
             continue
-        base = _slugify(str(row.get("name") or ""))
-        path, n = f"{FOLDER}/{base}.md", 2
-        while path.casefold() in taken:
-            path, n = f"{FOLDER}/{base}-{n}.md", n + 1
-        taken.add(path.casefold())
+        path = unique_path(FOLDER, str(row.get("name") or ""), taken)
+        taken.add(path)
         out[aid] = path
     return out
 
@@ -202,24 +192,38 @@ def _group_names(client: CanvasClient, course: int) -> dict[int, str]:
     return out
 
 
+def _mirrored_rows(client: CanvasClient, ctx: FetchContext) -> list[dict[str, Any]]:
+    course = ctx.config.course_id
+    rows: list[dict[str, Any]] = client.get(
+        f"/courses/{course}/assignments",
+        {**_PER_PAGE, "include[]": "overrides", "override_assignment_dates": "false"},
+    )
+    return [r for r in rows if _is_mirrored(r)]
+
+
+def assign_paths(client: CanvasClient, ctx: FetchContext) -> dict[int, str]:
+    """Assignment id -> tree path for every mirrored assignment (one list call).
+
+    fetch_course uses it in its id/path pre-pass. ``read`` computes the same assignment.
+    """
+    return _assign_paths(_mirrored_rows(client, ctx), ctx)
+
+
 def read(
     client: CanvasClient, ctx: FetchContext, *, paths: PathMap | None = None
 ) -> dict[str, CanvasObject]:
     """Assignments keyed by tree path (``assignments/<slug>.md``).
 
     Existing assignments keep the path they have in ``ctx.previous`` (matched by
-    ``canvas_id``); new ones get ``_slugify(title)`` with ``-2``, ``-3`` on collision.
+    ``canvas_id``); new ones get ``slugify(title)`` (remote/paths.py) with ``-2``, ``-3``
+    on collision.
     Assignments matched by ``.canvasignore`` are left out. ``paths`` maps (kind, id) to tree
     paths (pages by url slug, others by id) for rewriting links in bodies; default: the
     previous tree.
     """
     course = ctx.config.course_id
     groups = _group_names(client, course)
-    rows: list[dict[str, Any]] = client.get(
-        f"/courses/{course}/assignments",
-        {**_PER_PAGE, "include[]": "overrides", "override_assignment_dates": "false"},
-    )
-    rows = [r for r in rows if _is_mirrored(r)]
+    rows = _mirrored_rows(client, ctx)
     tree_paths = _assign_paths(rows, ctx)
     known = _known_paths(ctx, tree_paths, paths)
     previous = ctx.previous.objects if ctx.previous is not None else {}
