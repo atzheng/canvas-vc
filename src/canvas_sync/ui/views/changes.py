@@ -105,7 +105,8 @@ def render(state: State, path: str, query: Mapping[str, list[str]]) -> Response:
         )
         return page("Changes", body, current="changes", config=cfg)
     fetched = gitops.last_fetch_time(root)
-    body += f"<p>As of the last fetch ({esc(fetched) if fetched else '-'}); nothing is read from Canvas.</p>"
+    when = esc(fetched) if fetched else "-"
+    body += f"<p>As of the last fetch ({when}); nothing is read from Canvas.</p>"
     try:
         plan = build_plan(root).plan
     except CanvasSyncError as e:
