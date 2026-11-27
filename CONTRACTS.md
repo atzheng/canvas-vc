@@ -476,6 +476,15 @@ class ApplyContext:
     blobs: BlobStore
 ```
 
+`remote/roster.py`: `read(client, ctx, *, aliases: Mapping[str, str] | None = None) -> RosterCache`
+(not `Roster`: `Roster` comes from the tracked `roster.yaml`). Refs follow `student_ref`
+(`login_id`, `sis:<id>`, or alias via `aliases`, alias -> login, from the untracked
+`roster-aliases.yaml`; `load_aliases(root)`). Active students only; users without a usable
+ref are skipped; duplicate refs/section names/group names raise `ValidationError`. Groups are
+limited to `ctx.previous.roster.groups_category` when known, else all groups. `read` does no
+file I/O; `fetch_course` calls `write_cache(root, cache)` / `load_cache(root)`
+(`.canvas/roster-cache.json`).
+
 `remote/fetch.py`:
 
 ```python
