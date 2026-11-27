@@ -22,9 +22,9 @@ SLUG_MAX = 80
 
 def slugify(title: str) -> str:
     """NFKD -> ASCII -> lower -> runs of non-alphanumerics to ``-`` -> strip -> first 80
-    characters; ``untitled`` when nothing is left."""
+    characters -> strip; ``untitled`` when nothing is left."""
     text = unicodedata.normalize("NFKD", title).encode("ascii", "ignore").decode("ascii")
-    return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")[:SLUG_MAX] or "untitled"
+    return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")[:SLUG_MAX].strip("-") or "untitled"
 
 
 def unique_path(folder: str, title: str, taken: Collection[str]) -> str:

@@ -535,12 +535,12 @@ helpers in `remote/paths.py`). GET only.
 ```python
 def read(client, ctx, *, paths: Mapping[tuple[Kind, int | str], str] | None = None) -> dict[str, CanvasObject]
 def assign_paths(client, ctx) -> dict[str, str]   # pages: url slug -> tree path (list + rename probes, no bodies)
-def assign_paths(client, ctx) -> dict[int, str]   # announcements: topic id -> tree path (one list call)
+def assign_paths(client, ctx) -> dict[int, str]   # announcements and assignments: id -> tree path (one list call)
 ```
 
 - `paths` has the same type and keys as `modules.read` (pages by url slug, assignments,
   files and announcements by id; value = tree path). `fetch_course` does an id/path
-  pre-pass (list calls only; `assign_paths` for pages and announcements) and passes
+  pre-pass (list calls only; `assign_paths` in `pages`, `announcements` and `assignments`) and passes
   the same complete map to every reader. When given, links in bodies resolve through it
   alone. When `None`, they resolve through `ctx.previous` plus the objects of the kind
   being read; previous objects of that kind that no longer exist remotely are dropped.
@@ -554,7 +554,8 @@ def assign_paths(client, ctx) -> dict[int, str]   # announcements: topic id -> t
 - **Known limitation:** if page A is renamed and a new page B takes A's old slug, the
   slug match pairs the previous A with B. Needs a stored `page_id` to detect.
 - `slugify(title)`: NFKD, drop non-ASCII, lowercase, runs of non-alphanumerics become `-`,
-  strip `-`, first 80 characters, `untitled` if empty (same for pages and announcements;
+  strip `-`, first 80 characters, strip `-` again, `untitled` if empty (one rule for pages,
+  assignments and announcements, all through `remote/paths.py`;
   `unique_path(folder, title, taken)` adds the suffix).
 - `previous_objects(ctx, kind)`: tree path -> previous object of that kind.
   `link_context(ctx, from_path, read, paths=None)` builds the `LinkContext`.
