@@ -657,6 +657,19 @@ raised; the push CLI must report it as a stop, not a crash.
 - Modules are matched by `canvas_id` first, then by `modules.yaml#<name>` key
   (keys of repeated names are positional); that is the modules differ's job,
   core does not care how an operation's key was chosen.
+- Module operations (`plan/modules.py`, `remote/modules.py`). Module ops use key
+  `modules.yaml#<name>` (target key; base key for deletes), `before` the base `Module`,
+  `after` a `PlacedModule` (a `Module` plus `place`, `pred_id`, `pred_path`). Item ops use
+  key `modules.yaml#<name>/items[<j>]` (`j` = index in the target module, base index for
+  deletes) with `after` a `PlacedItem` (a `ModuleItem` plus `module_path`, `module_id`,
+  `from_module_id`, `content_path`, `content_id`, placement). `apply` puts a created item's
+  id in `ctx.ids` under that key, so **push must write item ids back to
+  `modules.yaml` by the same key** (module ids are under the module key). Order is set
+  relative to a predecessor (`place`/`pred_*`), never an absolute position: deletes run last
+  and Canvas positions shift. Only items outside the longest already-ordered run are moved.
+  Writers send JSON bodies (`{"module": {...}}`, `{"module_item": {...}}`) and look the
+  predecessor up with a live GET of the module (or item) list. New modules are created
+  unpublished and then published by a PUT; the new id is put in `ctx.ids` right after the POST. Page/assignment item titles are never sent. A local module delete never removes a module that still holds `unmanaged` items on Canvas: its managed items are deleted, the module stays, with a one-line warning. A hand-written `unmanaged` entry that carries a managed item's `canvas_id` is ignored (item kept) with a warning. The pages writer must return the str slug as its id (`_content_id` relies on it).
 
 ```python
 # errors.py
