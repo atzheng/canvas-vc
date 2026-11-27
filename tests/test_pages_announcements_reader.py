@@ -245,3 +245,37 @@ def test_stale_previous_ids_dropped_without_paths(tmp_path: Path) -> None:
     got = pages.read(fake.client("read"), ctx_for(tmp_path, {"pages/gone.md": prev}))
     page = got["pages/home.md"]
     assert isinstance(page, Page) and "gone.md" not in page.body
+
+
+def test_slug_reuse_keeps_path_bound_to_renamed_page(tmp_path: Path) -> None:
+    fake = FakeCanvas()
+    a = add_page(fake, "Intro", "<p>a</p>")
+    prev = Page(canvas_id="intro", page_id=a["page_id"], title="Intro", published=True, body="a")
+    rename_page(fake, a["page_id"], "Welcome")
+    b = add_page(fake, "Intro", "<p>b</p>")  # a new page takes the freed slug
+    assert b["url"] == "intro"
+    got = pages.read(fake.client("read"), ctx_for(tmp_path, {"pages/intro.md": prev}))
+    kept, new = got["pages/intro.md"], got["pages/intro-2.md"]
+    assert isinstance(kept, Page) and isinstance(new, Page)
+    assert (kept.canvas_id, kept.page_id, kept.body) == ("welcome", a["page_id"], "a")
+    assert (new.canvas_id, new.page_id) == ("intro", b["page_id"])
+    assert len(got) == 2
+
+
+def test_deleted_page_id_does_not_match_reused_slug(tmp_path: Path) -> None:
+    fake = FakeCanvas()
+    prev = Page(canvas_id="intro", page_id=999, title="Intro", body="old")
+    add_page(fake, "Intro", "<p>b</p>")
+    got = pages.read(fake.client("read"), ctx_for(tmp_path, {"pages/intro.md": prev}))
+    new = got["pages/intro.md"]
+    assert isinstance(new, Page) and new.page_id != 999 and new.body == "b"
+
+
+def test_legacy_file_without_page_id_matches_by_slug(tmp_path: Path) -> None:
+    fake = FakeCanvas()
+    a = add_page(fake, "Intro", "<p>a</p>")
+    prev = Page(canvas_id="intro", title="Intro", published=True, body="a")
+    got = pages.read(fake.client("read"), ctx_for(tmp_path, {"pages/x.md": prev}))
+    kept = got["pages/x.md"]
+    assert list(got) == ["pages/x.md"]
+    assert isinstance(kept, Page) and kept.page_id == a["page_id"]
