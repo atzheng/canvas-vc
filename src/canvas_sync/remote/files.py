@@ -7,10 +7,22 @@ when its Canvas ``updated_at`` or ``size`` differ from what was last downloaded.
 That is remembered in ``files-index.json`` inside the blob directory (local
 cache, never in git): ``FileEntry`` has no room for ``updated_at``, and an
 absent or stale cache only costs a download.
+
+Writer (bottom of this file): ``create`` uploads a new file; ``update`` uploads again
+only when the content hash changed (``on_duplicate=overwrite``, so Canvas keeps the
+replacement chain and itself repoints module items and in-course links) and otherwise
+sends a settings-only ``PUT``; ``delete`` removes one file. Every write to an existing
+file first runs ``_current_file``: ``GET /files/<old id>`` returns the *current* file of
+a replacement chain, so a stale id would otherwise write to a newer version. It refuses
+unless Canvas answers with the very id asked for, the file's folder belongs to this
+course (``context_type=Course``, ``context_id=course``; a student's submission attachment
+lives in a user folder) and the file sits at the path the tree says. The client repeats
+the course check before every ``PUT``/``DELETE /files/N``.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import tempfile
@@ -22,10 +34,11 @@ from typing import Any, cast
 from rich.console import Console
 
 from canvas_sync import gitops
-from canvas_sync.dates import from_canvas
-from canvas_sync.errors import CanvasAPIError
-from canvas_sync.model.base import CanvasObject
+from canvas_sync.dates import from_canvas, to_canvas
+from canvas_sync.errors import CanvasAPIError, CanvasSyncError, StaleRemote
+from canvas_sync.model.base import CanvasObject, Kind, ObjectKey
 from canvas_sync.model.files import FileEntry, FileSettings, FilesMeta
+from canvas_sync.plan.files import PlacedFile, canvas_settings
 from canvas_sync.progress import NullProgress, Progress
 from canvas_sync.remote.context import ApplyContext, FetchContext
 from canvas_sync.remote.http import CanvasClient
@@ -286,18 +299,217 @@ def read(client: CanvasClient, ctx: FetchContext) -> dict[str, CanvasObject]:
     return dict(read_files_meta(client, ctx).files)
 
 
+# ---------------------------------------------------------------------------
+# Writer
+# ---------------------------------------------------------------------------
+
+
+def _entry(obj: CanvasObject) -> FileEntry:
+    if not isinstance(obj, FileEntry):
+        raise TypeError(f"expected a FileEntry, got {type(obj).__name__}")
+    return obj
+
+
+def _desired(entry: FileEntry) -> FileSettings:
+    """Canvas-level settings the file should have (the differ's effective settings;
+    a bare ``FileEntry`` falls back to its own overrides)."""
+    if isinstance(entry, PlacedFile):
+        return canvas_settings(entry.effective)
+    return canvas_settings(
+        FileSettings(
+            published=entry.published,
+            hidden=entry.hidden,
+            unlock=entry.unlock or None,
+            lock=entry.lock or None,
+        )
+    )
+
+
+def _tree_path(entry: FileEntry) -> str:
+    return _PREFIX + entry.path
+
+
+def _folder_parts(ctx: ApplyContext, entry: FileEntry) -> list[str]:
+    root = [p for p in ctx.config.files_root.strip().strip("/").split("/") if p]
+    return [*root, *_nfc(entry.path).split("/")[:-1]]
+
+
+def _upload_folder(ctx: ApplyContext, entry: FileEntry) -> str:
+    return "/" + "/".join(_folder_parts(ctx, entry))
+
+
+def _basename(entry: FileEntry) -> str:
+    return _nfc(entry.path).rsplit("/", 1)[-1]
+
+
+def _expected_folder(ctx: ApplyContext, entry: FileEntry) -> str:
+    return "/".join([_ROOT_NAME, *_folder_parts(ctx, entry)])
+
+
+def _content(ctx: ApplyContext, entry: FileEntry) -> bytes:
+    """The bytes for ``entry.sha256``: the blob store, else the working tree file; the hash
+    is checked either way, so a changed or missing file is never uploaded under the wrong hash."""
+    sha = entry.sha256
+    data: bytes | None
+    try:
+        data = ctx.blobs.get(sha)
+    except FileNotFoundError:
+        data = None
+    if data is None:
+        local = ctx.blobs.root / _tree_path(entry)
+        if local.is_file():
+            data = local.read_bytes()
+    if data is None or hashlib.sha256(data).hexdigest() != sha:
+        raise CanvasSyncError(f"{_tree_path(entry)}: file content for {sha[:8]} is not available")
+    return data
+
+
+def _current_file(client: CanvasClient, ctx: ApplyContext, entry: FileEntry) -> dict[str, Any]:
+    """JSON of the file ``entry.canvas_id`` after checking it is safe to write to.
+
+    Refuses (nothing is written) unless Canvas returns this very id, the folder belongs to
+    this course, and the file sits at the entry's path."""
+    tree = _tree_path(entry)
+    if entry.canvas_id is None:
+        raise CanvasSyncError(f"{tree}: file has no canvas_id")
+    fid = int(entry.canvas_id)
+    raw = client.get_one(f"/files/{fid}")
+    data = cast("dict[str, Any]", raw) if isinstance(raw, dict) else {}
+    got = data.get("id")
+    if not isinstance(got, int) or isinstance(got, bool) or got != fid:
+        raise StaleRemote(
+            f"{tree}: file {fid} was replaced on Canvas (current id {got}); run canvas pull"
+        )
+    folder_id = data.get("folder_id")
+    if not isinstance(folder_id, int) or isinstance(folder_id, bool):
+        raise CanvasSyncError(f"{tree}: Canvas gave no folder for file {fid}")
+    folder_raw = client.get_one(f"/folders/{folder_id}")
+    folder = cast("dict[str, Any]", folder_raw) if isinstance(folder_raw, dict) else {}
+    if folder.get("context_type") != "Course" or str(folder.get("context_id")) != str(
+        client.course_id
+    ):
+        raise CanvasSyncError(f"{tree}: file {fid} is not in a folder of this course; not touched")
+    name = _nfc(str(data.get("display_name") or data.get("filename") or ""))
+    if _nfc(str(folder.get("full_name") or "")) != _expected_folder(ctx, entry) or (
+        name != _basename(entry)
+    ):
+        raise StaleRemote(f"{tree}: file {fid} was moved or renamed on Canvas; run canvas pull")
+    return data
+
+
+def _settings_patch(live: dict[str, Any], want: FileSettings, ctx: ApplyContext) -> dict[str, Any]:
+    """Fields of ``PUT /files/N`` that differ between Canvas's ``live`` file and ``want``.
+    A date to clear is an explicit null."""
+    have = FileSettings(
+        published=not bool(live.get("locked")),
+        hidden=bool(live.get("hidden")),
+        unlock=from_canvas(live.get("unlock_at"), ctx.tz),
+        lock=from_canvas(live.get("lock_at"), ctx.tz),
+    )
+    patch: dict[str, Any] = {}
+    if want.published != have.published:
+        patch["locked"] = not want.published
+    if want.hidden != have.hidden:
+        patch["hidden"] = want.hidden
+    if want.unlock != have.unlock:
+        patch["unlock_at"] = to_canvas(want.unlock or None)
+    if want.lock != have.lock:
+        patch["lock_at"] = to_canvas(want.lock or None)
+    return patch
+
+
+def _apply_settings(
+    client: CanvasClient, ctx: ApplyContext, live: dict[str, Any], entry: FileEntry
+) -> None:
+    patch = _settings_patch(live, _desired(entry), ctx)
+    if patch:
+        client.put(f"/files/{int(live['id'])}", json=patch)
+
+
+def _upload(client: CanvasClient, ctx: ApplyContext, entry: FileEntry) -> dict[str, Any]:
+    """Upload ``entry``'s content over the file of the same name and folder; returns Canvas's
+    file JSON. Refuses a result stored under another name (Canvas renames on a duplicate it
+    did not overwrite)."""
+    tree = _tree_path(entry)
+    name = _basename(entry)
+    result = client.upload_file(
+        _upload_folder(ctx, entry), name, _content(ctx, entry), on_duplicate="overwrite"
+    )
+    fid = result.get("id")
+    if not isinstance(fid, int) or isinstance(fid, bool):
+        raise CanvasAPIError(0, f"{tree}: upload returned no file id")
+    stored = _nfc(str(result.get("display_name") or result.get("filename") or ""))
+    if stored != name:
+        raise CanvasSyncError(f"{tree}: Canvas stored the upload as {stored!r}; check the course")
+    ctx.ids[ObjectKey(Kind.FILE, tree)] = fid
+    return result
+
+
+def _refuse_existing(client: CanvasClient, ctx: ApplyContext, entry: FileEntry) -> None:
+    """A new file must not land on a file Canvas already has at that path: the upload
+    overwrites by name, so it would replace something this tree never knew about."""
+    want = _expected_folder(ctx, entry)
+    folders = client.get(f"/courses/{client.course_id}/folders", _PER_PAGE)
+    for f in cast("list[dict[str, Any]]", folders):
+        if f.get("context_type", "Course") != "Course" or _nfc(str(f.get("full_name"))) != want:
+            continue
+        for item in cast(
+            "list[dict[str, Any]]", client.get(f"/folders/{f['id']}/files", _PER_PAGE)
+        ):
+            if _nfc(str(item.get("display_name") or "")) == _basename(entry):
+                raise StaleRemote(
+                    f"{_tree_path(entry)}: a file with this name already exists on Canvas; "
+                    "run canvas pull"
+                )
+
+
+def preflight(
+    client: CanvasClient, before: CanvasObject | None, after: CanvasObject, ctx: ApplyContext
+) -> None:
+    """Read-only, before the first write: content is available, an existing file is the
+    current one in this course at its path, a new file does not collide."""
+    new = _entry(after)
+    if before is None:
+        _content(ctx, new)
+        _refuse_existing(client, ctx, new)
+        return
+    old = _entry(before)
+    if new.sha256 and new.sha256 != old.sha256:
+        _content(ctx, new)
+    _current_file(client, ctx, old)
+
+
+def preflight_delete(client: CanvasClient, before: CanvasObject, ctx: ApplyContext) -> None:
+    """Read-only: the file to delete is the current one, in this course, at its path."""
+    _current_file(client, ctx, _entry(before))
+
+
 def create(client: CanvasClient, obj: CanvasObject, ctx: ApplyContext) -> int | str:
-    """Returns the new canvas_id."""
-    raise NotImplementedError
+    """Upload a new file; returns its canvas_id. Settings are sent only if Canvas's new file
+    differs from the wanted ones."""
+    entry = _entry(obj)
+    _refuse_existing(client, ctx, entry)
+    result = _upload(client, ctx, entry)
+    _apply_settings(client, ctx, result, entry)
+    return int(result["id"])
 
 
 def update(
     client: CanvasClient, before: CanvasObject, after: CanvasObject, ctx: ApplyContext
 ) -> None:
-    """Only changed fields are sent."""
-    raise NotImplementedError
+    """Settings-only change: ``PUT /files/<id>`` with the differing fields (id kept).
+    Changed content: one upload with ``on_duplicate=overwrite`` (new id, recorded in
+    ``ctx.ids``), then a ``PUT`` only if Canvas did not carry the settings over."""
+    old, new = _entry(before), _entry(after)
+    live = _current_file(client, ctx, old)
+    if new.sha256 and new.sha256 != old.sha256:
+        live = _upload(client, ctx, new)
+    _apply_settings(client, ctx, live, new)
 
 
 def delete(client: CanvasClient, obj: CanvasObject, ctx: ApplyContext) -> None:
-    """Goes through the submission guard."""
-    raise NotImplementedError
+    """Delete one file of this course (CONTRACTS.md section 10: never a submission file: the
+    id must be current and in a course folder, else nothing is sent)."""
+    entry = _entry(obj)
+    live = _current_file(client, ctx, entry)
+    client.delete(f"/files/{int(live['id'])}")

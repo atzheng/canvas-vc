@@ -139,6 +139,13 @@ def from_canvas_url(url: str, ctx: LinkContext) -> str | None:
     rel = posixpath.relpath(tree, base)
     frag = f"#{parts.fragment}" if parts.fragment else ""
     query = parts.query
-    if kind is Kind.FILE and extra != ["preview"]:
-        query = "&".join(q for q in query.split("&") if q and q != "wrap=1")
+    if kind is Kind.FILE:
+        # ``verifier`` is minted by Canvas (a fresh one whenever it rewrites a link after a
+        # file replacement), never written by a person: keep it out of the Markdown.
+        keep_wrap = extra == ["preview"]
+        query = "&".join(
+            q
+            for q in query.split("&")
+            if q and not q.startswith("verifier=") and (q != "wrap=1" or keep_wrap)
+        )
     return quote(rel, safe="/._-~") + (f"?{query}" if query else "") + frag

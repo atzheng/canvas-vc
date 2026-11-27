@@ -38,6 +38,7 @@ class RiskKind(StrEnum):
     ACCESS_REMOVED = "access_removed"
     POSTED_ANNOUNCEMENT = "posted_announcement"
     FILE_ID_CHANGE = "file_id_change"
+    FILES_DELETED = "files_deleted"  # many files deleted at once: needs --confirm-delete-files
     NOTIFIES_STUDENTS = "notifies_students"  # announcement posted now: needs --confirm-notify
 
 
