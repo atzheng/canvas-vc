@@ -144,6 +144,23 @@ def test_roster_names(tmp_path: Path) -> None:
     assert len(out) == 3
 
 
+def test_unknown_id_refs_warn_but_malformed_ones_fail(tmp_path: Path) -> None:
+    ov = (
+        '  - students: [pat, "unknown:55"]\n    due: 2025-01-01\n'
+        '  - section: "unknown:7"\n    due: 2025-01-01\n'
+        '  - group: "unknown:9"\n    due: 2025-01-01\n'
+    )
+    root = tree(tmp_path, {"assignments/hw.md": HW.format(ov=ov)})
+    issues = validate_tree(root, cache=CACHE)
+    assert not has_errors(issues)
+    assert [i.severity for i in issues] == ["warning"] * 3
+    assert "assignments/hw.md: student 'unknown:55' is not in the roster cache" in msgs(root)
+    bad = '  - students: ["unknown:0", "unknown:x"]\n    due: 2025-01-01\n'
+    root2 = tree(tmp_path / "b", {"assignments/hw.md": HW.format(ov=bad)})
+    out = [i for i in validate_tree(root2, cache=CACHE) if i.severity == "error"]
+    assert len(out) == 2 and all("malformed student ref" in i.message for i in out)
+
+
 def test_roster_without_cache_checks_only_listed_sections(tmp_path: Path) -> None:
     ov = "  - section: BA9\n    due: 2025-01-01\n  - group: G\n    due: 2025-01-01\n"
     root = tree(

@@ -448,6 +448,20 @@ def test_unknown_students_are_preserved_and_not_flagged(tmp_path: Path) -> None:
     env.fake.assert_submissions_intact(snapshot)
 
 
+def test_fetch_then_push_with_student_outside_the_cache_is_a_no_op(tmp_path: Path) -> None:
+    env = Env(tmp_path)  # ann/bob/cy are cached; the extra student (e.g. dropped) is not
+    a = base_assignment(env)
+    ghost = 999_002
+    add_override(env.fake, a["id"], student_ids=[env.users["ann"], ghost], title="Acc")
+    snapshot = env.submit(a["id"], "ann")
+    base = env.fetch()
+    assert current(base).overrides[0].students == sorted(["ann", f"unknown:{ghost}"])
+    plan, result = env.push(base, base)
+    assert plan.is_empty() and result.error is None
+    assert env.writes() == []
+    env.fake.assert_submissions_intact(snapshot)
+
+
 def test_unknown_section_refuses_before_any_write(tmp_path: Path) -> None:
     env = Env(tmp_path, roster=False)
     base_assignment(env)

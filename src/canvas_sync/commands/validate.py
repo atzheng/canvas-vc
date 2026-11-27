@@ -190,7 +190,7 @@ def _check_roster(
         ovs = [o for o in ovs if o.section is not None]
         cache = RosterCache()
     for problem in check_override_targets(ovs, roster, cache, where):
-        issues.append(Issue(where, problem.partition(": ")[2]))
+        issues.append(Issue(where, problem.message.partition(": ")[2], problem.severity))
 
 
 def _load_cache(root: Path, issues: list[Issue]) -> RosterCache | None:
