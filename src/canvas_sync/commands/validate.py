@@ -141,23 +141,38 @@ def _load_folder(
     return out
 
 
-def _check_dates(where: str, obj: object, issues: list[Issue]) -> None:
+@dataclass(frozen=True)
+class DateProblem:
+    """One date problem of an object; ``fields`` are the date fields it concerns."""
+
+    fields: tuple[str, ...]
+    message: str
+    severity: Literal["error", "warning"] = "error"
+
+
+def date_problems(obj: object) -> list[DateProblem]:
+    """Pure date checks for one object (or override): ambiguous times, unlock/due/lock order."""
     d: dict[str, datetime] = {}
     for name in ("publish_at", "post_at", "unlock", "due", "lock"):
         v = getattr(obj, name, None)
         if isinstance(v, datetime):
             d[name] = v
+    out: list[DateProblem] = []
     for name, v in d.items():
         if is_ambiguous_local(v):
-            issues.append(
-                Issue(where, f"{name} {v:%Y-%m-%d %H:%M} is ambiguous (fall-back hour)", "warning")
-            )
+            msg = f"{name} {v:%Y-%m-%d %H:%M} is ambiguous (fall-back hour)"
+            out.append(DateProblem((name,), msg, "warning"))
     if "unlock" in d and "lock" in d and d["unlock"] > d["lock"]:
-        issues.append(Issue(where, "unlock is after lock"))
+        out.append(DateProblem(("unlock", "lock"), "unlock is after lock"))
     if "unlock" in d and "due" in d and d["unlock"] > d["due"]:
-        issues.append(Issue(where, "unlock is after due", "warning"))
+        out.append(DateProblem(("unlock", "due"), "unlock is after due", "warning"))
     if "due" in d and "lock" in d and d["due"] > d["lock"]:
-        issues.append(Issue(where, "due is after lock", "warning"))
+        out.append(DateProblem(("due", "lock"), "due is after lock", "warning"))
+    return out
+
+
+def _check_dates(where: str, obj: object, issues: list[Issue]) -> None:
+    issues.extend(Issue(where, p.message, p.severity) for p in date_problems(obj))
 
 
 def _check_roster(
