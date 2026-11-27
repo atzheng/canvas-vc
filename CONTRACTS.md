@@ -482,7 +482,14 @@ def read(client: CanvasClient, ctx: FetchContext) -> dict[str, CanvasObject] | l
 def create(client, obj, ctx: ApplyContext) -> int | str          # returns new canvas_id
 def update(client, before, after, ctx: ApplyContext) -> None     # only changed fields are sent
 def delete(client, obj, ctx: ApplyContext) -> None               # goes through guard (§10)
+def preflight(client, before, after, ctx: ApplyContext) -> None # optional, read-only
 ```
+
+`preflight` is optional: `apply` calls it for every non-delete operation before the first
+write, so a writer can refuse (e.g. an override naming an unknown section) without a partial
+push. The assignments writer writes overrides inside the assignment's own `create`/`update`,
+one call per changed override (`plan.assignments.diff_overrides`), matched to live overrides
+by target, never touching `noop_id` overrides.
 
 ```python
 @dataclass
