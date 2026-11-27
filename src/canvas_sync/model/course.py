@@ -69,7 +69,7 @@ def _config_data(cfg: CourseConfig) -> dict[str, Any]:
     return data
 
 
-def _load_roster(root: Path) -> Roster:
+def load_roster(root: Path) -> Roster:
     path = root / "roster.yaml"
     if not path.exists():
         return Roster()
@@ -80,6 +80,9 @@ def _load_roster(root: Path) -> Roster:
         err = e.errors()[0]
         loc = ".".join(str(x) for x in err["loc"])
         raise ValidationError(f"roster.yaml: {loc}: {err['msg']}") from None
+
+
+_load_roster = load_roster  # old name
 
 
 def _as_file(o: CanvasObject) -> FileEntry:
@@ -112,7 +115,7 @@ def load_tree(root: Path) -> Course:
             modules = [_as_module(o) for o in spec.load(root, cfg).values()]
         else:
             objects.update({ObjectKey(kind, p): o for p, o in spec.load(root, cfg).items()})
-    return Course(cfg, objects, files_meta, modules, _load_roster(root))
+    return Course(cfg, objects, files_meta, modules, load_roster(root))
 
 
 def _module_key(name: str, taken: dict[str, CanvasObject]) -> str:
