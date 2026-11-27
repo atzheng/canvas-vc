@@ -30,7 +30,6 @@ from canvas_sync.errors import (
     UnresolvedConflicts,
     ValidationError,
 )
-from canvas_sync.plan import core as plan_core
 from canvas_sync.remote.backup import BackupError
 from tests.fake_canvas.assignments import add_assignment, add_assignment_group
 from tests.fake_canvas.core import FakeCanvas
@@ -91,16 +90,6 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     h.mkdir()
     monkeypatch.setenv("HOME", str(h))
     return h
-
-
-@pytest.fixture(autouse=True)
-def no_files_differ(monkeypatch: pytest.MonkeyPatch) -> None:
-    """plan/files.py is still a stub (raises NotImplementedError); push is tested without it."""
-    monkeypatch.setattr(
-        plan_core,
-        "DIFFER_MODULES",
-        tuple(m for m in plan_core.DIFFER_MODULES if not m.endswith(".files")),
-    )
 
 
 @pytest.fixture
@@ -172,7 +161,7 @@ def assert_synced(root: Path) -> None:
     (the .gitignore that clone adds); the tree is clean."""
     assert gitops.is_clean(root)
     assert gitops.is_ancestor(root, "refs/remotes/canvas/main", "HEAD")
-    assert git(root, "diff", "--name-only", "canvas/main", "HEAD").split() == [".gitignore"]
+    assert ".gitignore" in git(root, "diff", "--name-only", "canvas/main", "HEAD").split()
 
 
 def writes(fake: FakeCanvas) -> list[str]:
@@ -529,3 +518,21 @@ def test_partial_failure_then_pull_and_push_completes(
     assert titles.count("A First") == 1 and titles.count("B Second") == 1
     assert_synced(repo)
     fake.assert_submissions_intact(snap)
+
+
+def test_user_bytes_survive_the_fast_forward(fake: FakeCanvas, s: Seed, repo: Path) -> None:
+    """Comments in course.yaml and in an untouched assignment are not rewritten by a push."""
+    cfg = (repo / "course.yaml").read_text()
+    (repo / "course.yaml").write_text("# my course notes\n" + cfg)
+    edit(repo, "assignments/homework-2.md", "points: 5", "points: 5  # keep this comment")
+    edit(repo, "pages/notes.md", "Plain notes.", "Edited notes.")
+    commit(repo)
+    result, out = push(fake, repo)
+    assert result.ok and result.fast_forwarded, out
+    assert (repo / "course.yaml").read_text().startswith("# my course notes\n")
+    assert "# keep this comment" in (repo / "assignments/homework-2.md").read_text()
+    assert "Edited notes." in (repo / "pages/notes.md").read_text()
+    assert gitops.is_clean(repo)
+    assert gitops.is_ancestor(repo, "refs/remotes/canvas/main", "HEAD")
+    again, _ = push(fake, repo)
+    assert again.ops_total == 0

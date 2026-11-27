@@ -211,7 +211,7 @@ Per-type fields (frontmatter key = field name unless noted; all dates `LocalDT |
 - `Announcement`: `title, post_at, published: bool = True, body_format, body`
 - `Assignment`: `title, points: float | None, group: str | None, submission_types, allowed_extensions: list[str] = [], grading_type: str = "points", omit_from_final_grade = False, published, unlock, due, lock, assign_to_overrides_only = False, overrides: list[Override] = [], body_format, body`
 - `Override` (`model/overrides.py`): exactly one of `section: str`, `group: str`, `students: list[str]` (sorted), plus `title: str | None, unlock, due, lock`. Canonical order: sections by name, then groups by name, then student sets by first student. Overrides have no `canvas_id` in files, so readers and differs match existing Canvas overrides by target (section, group or student set). A section or group appears at most once, and a student in at most one student-set override. **`unknown:<canvas id>`**: for a section, group or student missing from the roster cache, the reader writes `unknown:<canvas id>` in place of the name or ref (with a warning) instead of dropping the override. The differ/writer must resolve such a value back to the Canvas id and must never send it to Canvas as a name or ref; `validate` reports it as an unknown target.
-- `FileEntry` (`model/files.py`): `path, canvas_id, sha256, published, hidden, unlock, lock, stable_link = False`. `FilesMeta` holds `defaults`, `rules: list[FileRule]` and `files: dict[path, FileEntry]` (only ids, hashes and settings that differ from what the rules give). `effective(path) -> FileSettings` applies defaults, then rules, then the per-file entry (`path` is a tree path, `files/a/b.pdf`, else ValueError; paths, keys and globs are NFC-normalised so macOS NFD names match; a later layer's non-None value wins, None inherits). `unlock`/`lock` are tri-state: a datetime, absent/null = inherit, `false` = explicitly no date (clears an earlier layer; `effective` returns None for it). Dump writes `false` only when an entry overrides a rule/default date, and an entry setting equal to what defaults+rules give is **not written**, so a later rule edit also changes that file (to pin a value, edit the rule or give the file a distinct value). `FileEntry.path` is relative to `files/` and equals the `_meta.yaml` key; `FilesMeta.files` keys are tree paths. In `_meta.yaml` a rule is flat (`- match: "*.pdf"` plus `published/hidden/unlock/lock`); date-only `unlock` uses `defaults.unlock_time`, date-only `lock` uses `defaults.assignment.due_time`. Dump writes an entry's `canvas_id`, `sha256`, `stable_link: true` and only those settings that differ from defaults+rules, entries sorted by path, and no `_meta.yaml` at all when everything is empty. Load rejects: unknown keys, a `canvas_id` shared by two entries (`files/_meta.yaml: files.<rel>: duplicate canvas_id N (also in <other>)`) or negative, `sha256` not `^[0-9a-f]{64}$`, keys that collide case-insensitively, contain a backslash, `..`, or a `_meta.yaml` component, and rule globs that don't compile (`rules[i]: match: invalid glob '<g>'`). `[]a]` makes `]` a class member; ranges are validated (`[z-a]` is invalid).
+- `FileEntry` (`model/files.py`): `path, canvas_id, sha256, published, hidden, unlock, lock, stable_link = False`. `FilesMeta` holds `defaults`, `rules: list[FileRule]` and `files: dict[path, FileEntry]` (only ids, hashes and settings that differ from what the rules give). `effective(path) -> FileSettings` applies defaults, then rules, then the per-file entry (`path` is a tree path, `files/a/b.pdf`, else ValueError; paths, keys and globs are NFC-normalised so macOS NFD names match; a later layer's non-None value wins, None inherits). `unlock`/`lock` are tri-state: a datetime, absent/null = inherit, `false` = explicitly no date (clears an earlier layer; `effective` returns None for it). Dump writes `false` only when an entry overrides a rule/default date, and an entry setting equal to what defaults+rules give is **not written**, so a later rule edit also changes that file (to pin a value, edit the rule or give the file a distinct value). `FileEntry.path` is relative to `files/` and equals the `_meta.yaml` key; `FilesMeta.files` keys are tree paths. In `_meta.yaml` a rule is flat (`- match: "*.pdf"` plus `published/hidden/unlock/lock`); date-only `unlock` uses `defaults.unlock_time`, date-only `lock` uses `defaults.assignment.due_time`. Dump writes an entry's `canvas_id`, `sha256`, `stable_link: true` and only those settings that differ from defaults+rules, entries sorted by path, and no `_meta.yaml` at all when everything is empty. Load rejects: unknown keys, a `canvas_id` shared by two entries (`files/_meta.yaml: files.<rel>: duplicate canvas_id N (also in <other>)`) or negative, `sha256` not `^[0-9a-f]{64}$`, keys that collide case-insensitively, contain a backslash, `..`, or a `_meta.yaml` component, and rule globs that don't compile (`rules[i]: match: invalid glob '<g>'`). `[]a]` makes `]` a class member; ranges are validated (`[z-a]` is invalid). **Loading from disk** (`FILE_SPEC.load_files_meta`, so `load_tree` and `load_course_at`): every regular file under `files/` (not `_meta.yaml`, `.DS_Store` or symlinks) has its `sha256` recomputed from its bytes, overriding the recorded one, and gets an entry if `_meta.yaml` has none; entries for files not on disk keep their recorded hash. Differs can therefore detect byte edits and new files from the Course alone.
   Rule `match` globs (`model.files.glob_match`, relative to `files/`, gitignore-like, case-sensitive): `*`/`?`/`[..]` never cross `/`; `**/` = zero or more dirs, trailing `/**` = everything inside; a pattern without `/` matches the name of the file or any parent dir at any depth (`*.pdf`), one containing `/` (or a leading `/`) is anchored at `files/`; matching a directory selects everything inside it; a trailing `/` requires a directory; `\x` escapes. Intended to be unified with `ignore.py` later.
 - `Module` (`model/modules.py`): `name, canvas_id, published, unlock, prerequisites: list[int] = [], require_sequential_progress: bool | None, completion_requirements: list[CompletionRequirement] = [], overrides: list[Override] (unlock only), items: list[ModuleItem]`. `ModuleItem`: exactly one of `page | assignment | file | header | url | quiz | discussion | unmanaged` (`quiz`/`discussion` are `{canvas_id: int}`, for unmanaged objects; `unmanaged` is below), plus `title, indent: int = 0, new_tab = False, published: bool | None, canvas_id`.
   **Unmanaged items and module settings (bead awi).** Canvas has module item types and module settings canvas-sync cannot write (external tools, prerequisites, completion requirements). They are *carried opaquely* so fetch followed by push is a no-op:
@@ -482,7 +482,14 @@ def read(client: CanvasClient, ctx: FetchContext) -> dict[str, CanvasObject] | l
 def create(client, obj, ctx: ApplyContext) -> int | str          # returns new canvas_id
 def update(client, before, after, ctx: ApplyContext) -> None     # only changed fields are sent
 def delete(client, obj, ctx: ApplyContext) -> None               # goes through guard (§10)
+def preflight(client, before, after, ctx: ApplyContext) -> None # optional, read-only
 ```
+
+`preflight` is optional: `apply` calls it for every non-delete operation before the first
+write, so a writer can refuse (e.g. an override naming an unknown section) without a partial
+push. The assignments writer writes overrides inside the assignment's own `create`/`update`,
+one call per changed override (`plan.assignments.diff_overrides`), matched to live overrides
+by target, never touching `noop_id` overrides.
 
 ```python
 @dataclass
@@ -769,7 +776,19 @@ def read_tree_files(root, commit: str) -> dict[str, bytes]   # for loading canva
 def load_course_at(root, commit: str) -> Course             # load_tree over a commit's files
 def merge(root, ref=REMOTE_REF, rebase=False) -> int        # runs git merge/rebase in the work tree; returns exit code
 def fast_forward(root, ref=REMOTE_REF) -> bool             # git merge --ff-only; False if not possible
+def merge_with_output(root, ref=REMOTE_REF, rebase=False) -> tuple[int, str]  # merge + git's one-line message
+def ahead_behind(root, ref=REMOTE_REF) -> tuple[int, int]   # (HEAD-only, ref-only) commit counts
+def changed_paths(root) -> list[str]                        # tracked files with staged/unstaged changes
+def record_fetch_time(root, when_iso: str) -> None          # run_fetch writes the fetch start time
+def last_fetch_time(root) -> str | None                     # .git/canvas-last-fetch, else canvas/main commit time
 ```
+
+**Plan for push and diff.** `commands/diff.py: build_plan(root) -> Plan` is
+`plan.core.diff(load_course_at(canvas/main), load_course_at(HEAD))`; `canvas diff` prints
+`plan.render()`. `push` should call the same function (it raises `CanvasSyncError` when
+canvas/main or HEAD is missing). `canvas status` reports the remote-moved check from
+GET list calls (pages, assignments, announcements) whose `updated_at` is later than
+`last_fetch_time`; modules and files are not part of this cheap check.
 
 ```python
 # snapshot.py
@@ -820,8 +839,14 @@ class IgnoreRules:
 ```
 
 Commit messages on `canvas/main`: `canvas fetch: <n> changed` or
-`canvas push: <n> operations`. After a push the user's branch is fast-forwarded
-to `canvas/main`. There's no separate write-back commit.
+`canvas push: <n> operations`. After a push the user's branch is
+fast-forwarded to `canvas/main`, or, when HEAD has files the snapshot has no place for
+(`.gitignore`, `.canvasignore`, README, ignored objects) or files whose parsed content equals
+the snapshot's (user comments/formatting), to a merge commit with parents HEAD and canvas/main
+whose tree is the snapshot with those files restored from HEAD
+(`gitops.tree_with_carried_files`). `canvas/main` is an ancestor of the branch either way.
+If the fast-forward fails, the target commit is kept at `refs/canvas/pushed`. The unexpected-
+difference check runs before canvas/main is moved. There's no separate write-back commit.
 
 `plan.diff` and `validate` ignore every path under `.canvas/`.
 

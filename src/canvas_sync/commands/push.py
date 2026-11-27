@@ -30,7 +30,7 @@ from rich.console import Console
 
 from canvas_sync import gitops
 from canvas_sync.apply import ApplyResult, apply, needs_guard
-from canvas_sync.commands.fetch import _bodies_at, _committed_inputs  # pyright: ignore[reportPrivateUsage]
+from canvas_sync.commands.fetch import bodies_at, committed_inputs
 from canvas_sync.commands.validate import find_conflicts, has_errors, validate_tree
 from canvas_sync.config import CourseConfig, get_token, load_config
 from canvas_sync.errors import (
@@ -157,9 +157,14 @@ def check_repo(root: Path, *, allow_dirty: bool) -> tuple[str, str]:
         raise NotFastForward("no canvas/main yet; run canvas fetch (or canvas pull) first")
     if not gitops.is_ancestor(root, main, head):
         if gitops.is_ancestor(root, head, main):
+            hint = (
+                f"git merge --ff-only {PUSHED_REF}"
+                if gitops.ref_commit(root, PUSHED_REF)
+                and gitops.is_ancestor(root, head, PUSHED_REF)
+                else "canvas pull"
+            )
             raise NotFastForward(
-                "canvas/main is ahead of HEAD (a previous push did not fast-forward); "
-                "run canvas pull"
+                f"canvas/main is ahead of HEAD (a previous push did not fast-forward); run {hint}"
             )
         raise NotFastForward("canvas/main is not an ancestor of HEAD; run canvas pull and merge")
     return head, main
@@ -178,7 +183,7 @@ def check_validation(root: Path, console: Console) -> None:
 def _context(
     root: Path, config: CourseConfig, previous: Course | None, bodies: Bodies
 ) -> FetchContext:
-    config, ignore = _committed_inputs(root, config)
+    config, ignore = committed_inputs(root, config)
     return FetchContext(
         config=config,
         tz=config.tz,
@@ -212,7 +217,7 @@ def check_stale(
     with canvas/main, in canonical serialized form (a fetched object and one loaded from a
     file differ in trivia such as a trailing newline). Raises ``StaleRemote`` naming the
     objects that differ."""
-    ctx = _context(root, config, base, _bodies_at(root, main))
+    ctx = _context(root, config, base, bodies_at(root, main))
     live = fetch_course(client, ctx, root=root)
     old, new = dump_tree(base), dump_tree(live)
     stale: list[str] = []
@@ -337,15 +342,22 @@ def _record_assignment_bodies(client: CanvasClient, ctx: ApplyContext, plan: Pla
             ctx.bodies.record(op.key.path, body, html)
 
 
-def _branch_target(root: Path, head: str, new_main: str, managed: set[str]) -> str:
-    """Commit to fast-forward the branch to. Normally canvas/main itself. If HEAD tracks files
-    the snapshot has no place for (``.gitignore``, ``.canvasignore``, ignored objects, a
-    README), a fast-forward to canvas/main would delete them, so the branch gets a merge
-    commit (parents HEAD and canvas/main) whose tree is the snapshot plus those files."""
-    tree = gitops.tree_with_carried_files(root, new_main, head, managed)
+PUSHED_REF = "refs/canvas/pushed"
+
+
+def _branch_target(
+    root: Path, head: str, new_main: str, managed: set[str], preserve: set[str]
+) -> str:
+    """Commit to fast-forward the branch to. Normally canvas/main itself. A plain fast-forward
+    would delete files the snapshot has no place for (``.gitignore``, ``.canvasignore``,
+    ignored objects, a README) and rewrite files whose content did not change but whose bytes
+    differ from the canonical dump (comments, formatting) -- ``preserve`` lists those. If there
+    are any, the branch gets a merge commit (parents HEAD and canvas/main) whose tree is the
+    snapshot with those files put back from HEAD."""
+    tree = gitops.tree_with_carried_files(root, new_main, head, managed, preserve)
     if tree is None:
         return new_main
-    return gitops.commit_tree(root, tree, [head, new_main], "canvas push: keep local-only files")
+    return gitops.commit_tree(root, tree, [head, new_main], "canvas push: keep local files")
 
 
 def _move_bodies(bodies: Bodies, base: Course, target: Course) -> None:
@@ -450,7 +462,7 @@ def run_push(
     head, main = check_repo(root, allow_dirty=allow_dirty)
     check_validation(root, out)
 
-    config, ignore = _committed_inputs(root, config)
+    config, ignore = committed_inputs(root, config)
     plan, base, target = _build_plan(root, head, main, ignore)
     skipped: list[Operation] = []
     if no_delete:
@@ -474,9 +486,10 @@ def run_push(
         ask: Callable[[str], bool] = confirm or (lambda msg: typer.confirm(msg, default=False))
         if not ask(f"Push {_count(plan)} to Canvas?"):
             raise CanvasSyncError("aborted; nothing written")
+        check_stale(root, client, config, plan, base, main)  # the prompt may have waited
 
     ids = backup_and_ids(client, config, plan, target)
-    bodies = _bodies_at(root, main)
+    bodies = bodies_at(root, main)
     ctx = ApplyContext(
         config=config,
         tz=config.tz,
@@ -502,30 +515,37 @@ def run_push(
     fetched = fetch_course(client, fctx, root=root)
     live = {k.path for k in fetched.objects}
     final = Bodies({p: r for p, r in ctx.bodies.entries.items() if p in live})
-    result.commit = snapshot(
-        root, fetched, final, fctx.blob_store, f"canvas push: {len(plan.ops)} operations", head
-    )
     result.unexpected = _unexpected(expected, fetched, plan)
     if result.unexpected:
         out.print(
             "error: Canvas stored something different from HEAD in "
-            f"{', '.join(result.unexpected)}; this is a bug; not fast-forwarding "
-            "(inspect git diff HEAD canvas/main)",
+            f"{', '.join(result.unexpected)}; this is a bug; canvas/main was not updated "
+            "(run canvas fetch and inspect git diff HEAD canvas/main)",
             markup=False,
             highlight=False,
         )
         return result
+    result.commit = snapshot(
+        root, fetched, final, fctx.blob_store, f"canvas push: {len(plan.ops)} operations", head
+    )
     new_main = result.commit or main
-    target_commit = _branch_target(root, head, new_main, set(dump_tree(expected)))
+    # Files whose parsed content equals what Canvas stored keep HEAD's exact bytes.
+    mine, theirs = dump_tree(target), dump_tree(fetched)
+    preserve = {p for p, data in mine.items() if theirs.get(p) == data}
+    target_commit = _branch_target(root, head, new_main, set(mine), preserve)
     result.fast_forwarded = gitops.fast_forward(root, target_commit)
     if result.fast_forwarded:
         out.print(
             f"Pushed {_count(plan)}; canvas/main is {str(result.commit)[:7]}", highlight=False
         )
     else:
+        old = gitops.ref_commit(root, PUSHED_REF)
+        gitops.update_ref(root, PUSHED_REF, target_commit, old)
         out.print(
             f"Pushed {_count(plan)}, but could not fast-forward the branch "
-            "(uncommitted changes in the way?); run: git merge --ff-only canvas/main",
+            "(uncommitted changes in the way?); commit or stash them, then run: "
+            f"git merge --ff-only {PUSHED_REF}",
+            markup=False,
             highlight=False,
         )
     return result

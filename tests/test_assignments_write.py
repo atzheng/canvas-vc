@@ -14,7 +14,7 @@ import pytest
 
 from canvas_sync.apply import ApplyResult, apply
 from canvas_sync.config import CourseConfig
-from canvas_sync.errors import CanvasSyncError, GuardBlocked, ValidationError
+from canvas_sync.errors import GuardBlocked, ValidationError
 from canvas_sync.ignore import IgnoreRules
 from canvas_sync.model.assignment import ASSIGNMENT_SPEC, Assignment
 from canvas_sync.model.base import CanvasObject, Kind, ObjectKey
@@ -79,13 +79,13 @@ def test_unknown_refs_unchanged_produce_no_ops() -> None:
     assert ops_of({"assignments/a.md": a}, {"assignments/a.md": a.model_copy()}) == []
 
 
-def test_override_change_is_refused_at_plan_time() -> None:
+def test_override_change_is_an_update_carrying_the_overrides() -> None:
     old = asg(canvas_id=1)
     new = old.model_copy(update={"overrides": [Override(section="BA2")]})
-    with pytest.raises(ValidationError, match=r"assignments/a.md: pushing override changes"):
-        ops_of({"assignments/a.md": old}, {"assignments/a.md": new})
-    with pytest.raises(ValidationError, match="override changes"):
-        ops_of({}, {"assignments/n.md": asg(overrides=[Override(section="BA2")])})
+    (op,) = ops_of({"assignments/a.md": old}, {"assignments/a.md": new})
+    assert op.action is Action.UPDATE and set(op.changes) == {"overrides"}
+    (op,) = ops_of({}, {"assignments/n.md": asg(overrides=[Override(section="BA2")])})
+    assert op.action is Action.CREATE
 
 
 def test_duplicate_canvas_id_in_target_is_refused() -> None:
@@ -412,16 +412,16 @@ def test_override_change_plus_new_group_writes_nothing(env: Env) -> None:
     target = dataclasses.replace(
         target, objects={**target.objects, ObjectKey(Kind.ASSIGNMENT, "assignments/new.md"): new}
     )
-    with pytest.raises(ValidationError, match="override changes"):
-        env.push(base, target)
+    with pytest.raises(ValidationError, match="unknown section 'BA2'"):
+        env.push(base, target)  # the pre-flight refuses: not even the new group is created
     assert env.writes() == []
 
 
-def test_writer_refuses_override_change_as_second_line_of_defence(env: Env) -> None:
+def test_writer_refuses_unknown_override_name_before_any_write(env: Env) -> None:
     a = add_assignment(env.fake, "HW")
     before = Assignment(canvas_id=a["id"], title="HW")
-    after = before.model_copy(update={"overrides": [Override(section="BA2")]})
-    with pytest.raises(CanvasSyncError):
+    after = before.model_copy(update={"title": "X", "overrides": [Override(section="BA2")]})
+    with pytest.raises(ValidationError, match="unknown section"):
         remote.update(env.client, before, after, env.ctx())
     assert env.writes() == []
 

@@ -283,6 +283,37 @@ def load_course_at(root: Path, commit: str) -> Course:
         return load_tree(base)
 
 
+def merge_with_output(root: Path, ref: str = REMOTE_REF, rebase: bool = False) -> tuple[int, str]:
+    """:func:`merge`, also returning git's message: the first non-empty stderr line, else the
+    last stdout line, else ``""`` (for a one-line report)."""
+    args = ["rebase", ref] if rebase else ["merge", "--no-edit", "--allow-unrelated-histories", ref]
+    proc = _run(root, args, ok=tuple(range(256)))
+    err = [ln.strip() for ln in proc.stderr.decode(errors="replace").splitlines() if ln.strip()]
+    out = [ln.strip() for ln in proc.stdout.decode(errors="replace").splitlines() if ln.strip()]
+    msg = err[0] if err else out[-1] if out else ""
+    # git lists the files it refuses to overwrite as tab-indented lines.
+    listed = [
+        ln.strip()
+        for ln in proc.stderr.decode(errors="replace").splitlines()
+        if ln.startswith(("\t", " " * 4)) and ln.strip()
+    ]
+    if listed:
+        msg += f" [{', '.join(listed)}]"
+    return proc.returncode, msg
+
+
+def operation_in_progress(root: Path) -> str | None:
+    """``"merge"`` or ``"rebase"`` if one is unfinished in this work tree, else None."""
+    for name, what in (
+        ("MERGE_HEAD", "merge"),
+        ("rebase-merge", "rebase"),
+        ("rebase-apply", "rebase"),
+    ):
+        if Path(_out(root, ["rev-parse", "--path-format=absolute", "--git-path", name])).exists():
+            return what
+    return None
+
+
 def merge(root: Path, ref: str = REMOTE_REF, rebase: bool = False) -> int:
     """Run ``git merge`` (or ``rebase``) of ``ref`` in the work tree; returns the exit code.
 
@@ -293,8 +324,7 @@ def merge(root: Path, ref: str = REMOTE_REF, rebase: bool = False) -> int:
     Unrelated histories are allowed for merge: the first fetch creates a root commit
     on canvas/main.
     """
-    args = ["rebase", ref] if rebase else ["merge", "--no-edit", "--allow-unrelated-histories", ref]
-    return _run(root, args, ok=tuple(range(256))).returncode
+    return merge_with_output(root, ref, rebase)[0]
 
 
 def fast_forward(root: Path, ref: str = REMOTE_REF) -> bool:
@@ -305,29 +335,42 @@ def fast_forward(root: Path, ref: str = REMOTE_REF) -> bool:
 
 
 def tree_with_carried_files(
-    root: Path, new: str, old: str, managed: Collection[str] = ()
+    root: Path,
+    new: str,
+    old: str,
+    managed: Collection[str] = (),
+    preserve: Collection[str] = (),
 ) -> str | None:
-    """Tree of commit ``new`` plus the files of commit ``old`` that ``new`` has no place for
-    (paths in neither ``new`` nor ``managed``): ``.gitignore``, a README. None if there are
-    none. Built in a temporary index; the work tree and the user index are untouched."""
+    """Tree of commit ``new`` with some of the files of commit ``old`` put back.
 
-    def listing(commit: str) -> list[tuple[str, str, str]]:
-        out: list[tuple[str, str, str]] = []
+    - files of ``old`` that ``new`` has no place for (paths in neither ``new`` nor
+      ``managed``): ``.gitignore``, a README;
+    - files in ``preserve`` that both commits have: ``old``'s blob wins, so content the
+      user wrote (comments, formatting) survives although the paths are semantically equal.
+
+    None if the result would equal ``new``'s tree. Built in a temporary index; the work
+    tree and the user's index are untouched."""
+
+    def listing(commit: str) -> dict[str, tuple[str, str]]:
+        out: dict[str, tuple[str, str]] = {}
         for rec in _run(root, ["ls-tree", "-r", "-z", "--full-tree", commit]).stdout.split(b"\0"):
             if b"\t" not in rec:
                 continue
             meta, path = rec.split(b"\t", 1)
             mode, kind, sha = meta.decode().split()
             if kind == "blob":
-                out.append((mode, sha, path.decode()))
+                out[path.decode()] = (mode, sha)
         return out
 
-    have = {path for _, _, path in listing(new)} | set(managed)
-    keep = [
-        f"{mode} {sha}\t{path}".encode() + b"\0"
-        for mode, sha, path in listing(old)
-        if path not in have
-    ]
+    have, was = listing(new), listing(old)
+    keep: list[bytes] = []
+    for path, (mode, sha) in was.items():
+        if path in have:
+            if path not in preserve or have[path][1] == sha:
+                continue
+        elif path in managed:
+            continue
+        keep.append(f"{mode} {sha}\t{path}".encode() + b"\0")
     if not keep:
         return None
     with tempfile.TemporaryDirectory(prefix="canvas-index-") as tmp:
@@ -335,3 +378,48 @@ def tree_with_carried_files(
         _run(root, ["read-tree", new], env=env)
         _run(root, ["update-index", "--add", "-z", "--index-info"], env=env, stdin=b"".join(keep))
         return _out(root, ["write-tree"], env=env)
+
+
+def ahead_behind(root: Path, ref: str = REMOTE_REF) -> tuple[int, int]:
+    """(commits in HEAD not in ``ref``, commits in ``ref`` not in HEAD); (0, 0) if either
+    is missing."""
+    if head_commit(root) is None or ref_commit(root, ref) is None:
+        return 0, 0
+    a, b = _out(root, ["rev-list", "--left-right", "--count", f"HEAD...{ref}"]).split()
+    return int(a), int(b)
+
+
+def changed_paths(root: Path) -> list[str]:
+    """Tracked files with staged or unstaged changes (untracked files are not counted)."""
+    out = _run(root, ["status", "--porcelain", "-z", "--untracked-files=no"]).stdout.decode()
+    recs = out.split("\0")
+    paths: list[str] = []
+    i = 0
+    while i < len(recs):
+        rec = recs[i]
+        i += 1
+        if len(rec) > 3:
+            paths.append(rec[3:])
+            if rec[0] in "RC":  # a rename/copy record is followed by its source path
+                i += 1
+    return sorted(paths)
+
+
+FETCH_TIME_FILE = "canvas-last-fetch"
+
+
+def record_fetch_time(root: Path, when: str) -> None:
+    """Remember (ISO 8601 UTC text) when the last fetch started; local cache only."""
+    (git_common_dir(root) / FETCH_TIME_FILE).write_text(when + "\n", encoding="utf-8")
+
+
+def last_fetch_time(root: Path) -> str | None:
+    """The recorded start of the last fetch, else the commit time of canvas/main, else None."""
+    try:
+        text = (git_common_dir(root) / FETCH_TIME_FILE).read_text(encoding="utf-8").strip()
+    except OSError:
+        text = ""
+    if text:
+        return text
+    commit = ref_commit(root)
+    return _out(root, ["log", "-1", "--format=%cI", commit]) if commit else None
