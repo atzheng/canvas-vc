@@ -42,17 +42,20 @@ def _match_renamed(
     claimed: dict[str, str],
     remote: dict[str, dict[str, Any]],
 ) -> None:
-    """Pair previous pages whose slug is gone with remote pages renamed on Canvas.
+    """Pair previous pages that have no ``page_id`` and whose slug is gone with renamed pages.
 
-    The page model keeps the slug as ``canvas_id`` and has no page id, so a renamed page
-    is found by asking Canvas for the old slug (it redirects to the page) and comparing
-    ``page_id``s. Fills ``claimed`` (new slug -> previous tree path).
+    Only files written before ``page_id`` existed need this: Canvas redirects the old slug
+    to the page, and the ``page_id``s are compared. Fills ``claimed`` (new slug -> path).
     """
     taken = set(claimed.values())
     orphans = {
         path: str(o.canvas_id)
         for path, o in previous.items()
-        if o.canvas_id is not None and path not in taken and str(o.canvas_id) not in remote
+        if isinstance(o, Page)
+        and o.page_id is None
+        and o.canvas_id is not None
+        and path not in taken
+        and str(o.canvas_id) not in remote
     }
     unclaimed = {s: r for s, r in remote.items() if s not in claimed}
     for path, old in sorted(orphans.items()):
@@ -86,9 +89,17 @@ def _plan(
     previous = previous_objects(ctx, Kind.PAGE)
 
     claimed: dict[str, str] = {}  # slug -> tree path, existing objects
-    for path, obj in previous.items():
-        if obj.canvas_id is not None and str(obj.canvas_id) in remote:
-            claimed[str(obj.canvas_id)] = path
+    by_pid = {p["page_id"]: s for s, p in remote.items() if p.get("page_id") is not None}
+    for path, obj in sorted(previous.items()):  # stable page_id first: survives renames
+        if isinstance(obj, Page) and obj.page_id in by_pid:
+            claimed.setdefault(by_pid[obj.page_id], path)
+    for path, obj in sorted(previous.items()):
+        # A file with a page_id never matches by slug (the slug may belong to another page now).
+        if isinstance(obj, Page) and obj.page_id is not None:
+            continue
+        slug = str(obj.canvas_id) if obj.canvas_id is not None else None
+        if slug in remote and slug not in claimed and path not in claimed.values():
+            claimed[slug] = path
     _match_renamed(client, ctx, previous, claimed, remote)
 
     taken = set(claimed.values())
@@ -109,8 +120,9 @@ def read(
     """Pages keyed by tree path (GET only).
 
     ``Page.canvas_id`` is the page's current Canvas ``url`` slug; module items and links
-    use it. Pages in ``ctx.previous`` keep their tree path, matched by slug and, when
-    the slug changed on Canvas, by ``page_id`` (see ``_match_renamed``). New pages get
+    use it. ``Page.page_id`` is the stable Canvas id. Pages in ``ctx.previous`` keep their
+    tree path, matched by ``page_id`` first, then (files without one) by slug and the
+    old-slug redirect (see ``_match_renamed``). New pages get
     ``pages/<slugify(title)>.md`` (see ``assign_paths``). Pages matched by
     ``.canvasignore`` are dropped. ``paths`` is the complete ``(kind, id) -> tree path``
     map from fetch_course (pages by slug); links resolve through it when given.
@@ -137,6 +149,7 @@ def read(
         )
         out[path] = Page(
             canvas_id=slug,
+            page_id=_int(full.get("page_id")),
             title=str(full.get("title") or ""),
             published=bool(full.get("published")),
             publish_at=from_canvas(full.get("publish_at"), ctx.tz),
@@ -147,8 +160,31 @@ def read(
     return out
 
 
+def _int(v: Any) -> int | None:
+    return v if isinstance(v, int) and not isinstance(v, bool) else None
+
+
 def _slug_path(ctx: ApplyContext, slug: str) -> str:
     return f"/courses/{ctx.config.course_id}/pages/{quote(slug, safe='')}"
+
+
+def _verify(client: CanvasClient, ctx: ApplyContext, page: Page, path: str) -> str:
+    """The slug to address ``page`` by, after checking it still is the same page.
+
+    A slug can be reused by another page after a rename, so when the page has a
+    ``page_id`` the GET must return that id; otherwise the write is refused.
+    """
+    slug = str(page.canvas_id)
+    if page.page_id is None:
+        return slug
+    row = client.get_one(_slug_path(ctx, slug))
+    got = row.get("page_id") if isinstance(row, dict) else None  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+    if got != page.page_id:
+        raise CanvasSyncError(
+            f"{path}: page slug {slug!r} now belongs to another page on Canvas; "
+            "run `canvas fetch` and retry"
+        )
+    return slug
 
 
 def _fields(ctx: ApplyContext, obj: Page, before: Page | None, key_path: str) -> dict[str, Any]:
@@ -222,7 +258,7 @@ def update(
     fields = _fields(ctx, new, old, key_path)
     if not fields:
         return
-    slug = str(old.canvas_id)
+    slug = _verify(client, ctx, old, key_path or new.title)
     row = client.put(_slug_path(ctx, slug), json={"wiki_page": fields})
     new_slug = str(row.get("url") or slug) if isinstance(row, dict) else slug  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
     if key_path:
@@ -236,7 +272,7 @@ def delete(client: CanvasClient, obj: CanvasObject, ctx: ApplyContext) -> None:
     page = _as_page(obj)
     if page.canvas_id is None:
         raise CanvasSyncError(f"page {page.title!r} has no Canvas id")
-    client.delete(_slug_path(ctx, str(page.canvas_id)))
+    client.delete(_slug_path(ctx, _verify(client, ctx, page, page.title)))
 
 
 def _as_page(obj: CanvasObject) -> Page:
