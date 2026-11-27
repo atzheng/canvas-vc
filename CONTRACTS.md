@@ -918,7 +918,7 @@ Markdown bodies render with `markdown-it-py`, already a dependency.
 - Reads the tree through `model.course.load_tree` and `gitops`
   (`load_course_at`, `ahead_behind`, `read_tree_files`, `head_commit`,
   `ref_commit`, `operation_in_progress`, `conflict_marker_paths`,
-  `changed_paths`, `last_fetch_time`) only. No `gitops` function that changes
+  `changed_paths`, `last_fetch_time`, and the read-only `repo_root`) only. No `gitops` function that changes
   refs, the index or the work tree (`update_ref`, `write_tree`,
   `commit_tree`, `merge`, `fast_forward`, `merge_with_output`,
   `record_fetch_time`, ...).
@@ -977,7 +977,7 @@ class Response:
     headers: tuple[tuple[str, str], ...] = ()
 def page(title: str, body: str, *, current: str, config: CourseConfig | None) -> Response
     # full document: nav bar (Overview Modules Objects Timeline Files Changes),
-    # `current` highlighted, course title from config, link to /static/ui.css
+    # `current` highlighted, course name from config (course.yaml has no title, so "course <id>"), link to /static/ui.css
 def not_found(msg: str = "not found") -> Response
 def error_page(msg: str, status: int = 500) -> Response
 ```
@@ -1000,7 +1000,8 @@ class State:                         # built fresh per request by State.load(roo
     @classmethod
     def load(cls, root: Path) -> "State"
     def remote_course(self) -> Course | None     # load_course_at(canvas/main); None when never fetched
-    def index(self) -> Index                      # ui.index.build_index(course), computed on demand
+    # `index(self) -> Index` (ui.index.build_index(course)) is added by the first view bead that
+    # needs it, once ui/index.py (mbz.3) has merged; mbz.2 cannot import it yet.
 
 # every view module:
 def render(state: State, path: str, query: Mapping[str, list[str]]) -> Response
