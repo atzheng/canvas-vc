@@ -133,7 +133,17 @@ def test_delete_blocked_when_assignment_flags_lag_but_submissions_exist(fake: Fa
 def test_delete_ignores_unsubmitted_placeholders(fake: FakeCanvas) -> None:
     a = gf.add_assignment(fake)
     fake.seed_submissions(
-        a["id"], [{"user_id": 7, "workflow_state": "unsubmitted", "submitted_at": None, "attempt": None, "submission_type": None, "body": None}]
+        a["id"],
+        [
+            {
+                "user_id": 7,
+                "workflow_state": "unsubmitted",
+                "submitted_at": None,
+                "attempt": None,
+                "submission_type": None,
+                "body": None,
+            }
+        ],
     )
     make_guard(fake).assert_allowed(delete_op(a["id"]), set())
 
