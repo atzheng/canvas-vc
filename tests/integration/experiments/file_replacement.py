@@ -25,7 +25,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from canvas_sync.errors import CanvasAPIError
+from canvas_sync.errors import CanvasSyncError
 from canvas_sync.remote.http import CanvasClient
 
 REQUIRED_URL = "https://canvas.ubc.ca"
@@ -115,7 +115,7 @@ def _file_summary(f: dict[str, Any]) -> dict[str, Any]:
 def _try(fn: Any) -> Any:
     try:
         return fn()
-    except CanvasAPIError as e:
+    except CanvasSyncError as e:
         return {"error": f"{type(e).__name__}: {str(e)[:120]}"}
 
 
