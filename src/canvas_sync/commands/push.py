@@ -61,7 +61,14 @@ from canvas_sync.render.links import LinkContext
 from canvas_sync.render.md2html import md_to_html
 from canvas_sync.snapshot import BlobStore, snapshot
 
-ALL_FLAGS = frozenset({"--confirm-grading-change", "--confirm-access-removal", "--confirm-notify"})
+ALL_FLAGS = frozenset(
+    {
+        "--confirm-grading-change",
+        "--confirm-access-removal",
+        "--confirm-notify",
+        "--confirm-delete-files",
+    }
+)
 _BODY_KINDS = (Kind.PAGE, Kind.ASSIGNMENT, Kind.ANNOUNCEMENT)
 
 
@@ -589,6 +596,9 @@ def push(
     confirm_notify: Annotated[
         bool, typer.Option("--confirm-notify", help="Allow posting announcements now")
     ] = False,
+    confirm_delete_files: Annotated[
+        bool, typer.Option("--confirm-delete-files", help="Allow deleting many files at once")
+    ] = False,
 ) -> None:
     """Apply the local changes to Canvas."""
     confirmed: set[str] = set()
@@ -596,6 +606,7 @@ def push(
         ("--confirm-grading-change", confirm_grading_change),
         ("--confirm-access-removal", confirm_access_removal),
         ("--confirm-notify", confirm_notify),
+        ("--confirm-delete-files", confirm_delete_files),
     ):
         if given:
             confirmed.add(flag)

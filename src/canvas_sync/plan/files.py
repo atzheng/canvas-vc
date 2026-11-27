@@ -23,6 +23,7 @@ every module that holds it.
 
 from __future__ import annotations
 
+import dataclasses
 from typing import TYPE_CHECKING
 
 from canvas_sync.errors import ValidationError
@@ -34,6 +35,10 @@ if TYPE_CHECKING:
     from canvas_sync.model.course import Course
 
 _SETTING_FIELDS = ("published", "hidden", "unlock", "lock")
+
+# Deleting more files than this, or every file the course has (two or more), needs
+# ``--confirm-delete-files`` (e.g. ``files/`` and ``_meta.yaml`` removed by mistake).
+MASS_DELETE_LIMIT = 5
 
 ID_CHANGE_MESSAGE = (
     "new upload gets a new Canvas file id; Canvas repoints module items and links inside "
@@ -123,4 +128,14 @@ def diff_type(base: Course, target: Course) -> list[Operation]:
             changes.update(settings)
             action = Action.UPLOAD if content else Action.UPDATE
             ops.append(Operation(key, action, before, after, changes, risks))
+    deletes = [o for o in ops if o.action is Action.DELETE]
+    if len(deletes) > MASS_DELETE_LIMIT or (len(deletes) > 1 and len(deletes) == len(b.files)):
+        risk = Risk(
+            RiskKind.FILES_DELETED,
+            f"{len(deletes)} files would be deleted from Canvas",
+            "--confirm-delete-files",
+        )
+        ops = [
+            dataclasses.replace(o, risks=(risk,)) if o.action is Action.DELETE else o for o in ops
+        ]
     return ops

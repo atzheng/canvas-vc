@@ -17,7 +17,7 @@ from canvas_sync.commands.clone import clone_course
 from canvas_sync.commands.fetch import run_fetch
 from canvas_sync.commands.push import PushResult, run_push
 from canvas_sync.config import CourseConfig, load_config
-from canvas_sync.errors import CanvasSyncError, StaleRemote
+from canvas_sync.errors import CanvasSyncError, GuardBlocked, StaleRemote
 from canvas_sync.model.base import Kind, ObjectKey
 from canvas_sync.model.files import FileEntry
 from canvas_sync.plan.core import Action, Operation, Plan
@@ -69,6 +69,7 @@ class Seed:
     notes: dict[str, Any]
     lectures: dict[str, Any]
     page: dict[str, Any]
+    img_page: dict[str, Any]
     item: dict[str, Any]
 
 
@@ -87,6 +88,9 @@ def s(fake: FakeCanvas) -> Seed:
         fake,
         "Reading",
         f'<p>See <a href="/courses/101/files/{s.slides["id"]}?wrap=1">the slides</a>.</p>',
+    )
+    s.img_page = add_page(
+        fake, "Gallery", f'<p><img src="/courses/101/files/{s.slides["id"]}/preview" alt="x" /></p>'
     )
     mod = add_module(fake, "Week 1")
     s.item = add_item(fake, mod["id"], "File", title="Slides", content_id=s.slides["id"], indent=0)
@@ -164,6 +168,9 @@ def test_content_change_end_to_end(fake: FakeCanvas, s: Seed, repo: Path) -> Non
     assert f"/files/{new['id']}?wrap=1&verifier=" in body and f"/files/{old_id}" not in body
     # push then fetch is a no-op: nothing differs, the page Markdown has no id or verifier
     assert tree_diff_empty(repo)
+    img = fake.state("pages")["pages"][s.img_page["page_id"]]["body"]
+    assert f"/files/{new['id']}/preview?verifier=" in img  # Canvas rewrote the <img> too
+    assert (repo / "pages/gallery.md").read_text().count("verifier") == 0
     assert (repo / "pages/reading.md").read_text().count("verifier") == 0
     assert f"canvas_id: {new['id']}" in (repo / "files/_meta.yaml").read_text()
     fake.log.clear()
@@ -358,6 +365,42 @@ def test_verifier_query_is_not_kept_in_markdown_links() -> None:
         paths=lambda kind, cid: "files/x.pdf" if (kind, cid) == (Kind.FILE, 7) else None,
     )
     assert from_canvas_url("/courses/101/files/7?wrap=1&verifier=abc", ctx) == "../files/x.pdf"
+    assert from_canvas_url("/courses/101/files/7/preview?verifier=abc", ctx) == "../files/x.pdf"
+    assert from_canvas_url("/courses/101/files/7/preview?a=1&verifier=abc", ctx) == (
+        "../files/x.pdf?a=1"
+    )
     assert from_canvas_url("/courses/101/files/7/download?verifier=abc&x=1", ctx) == (
         "../files/x.pdf?x=1"
     )
+
+
+def test_refused_file_delete_is_found_before_any_write(
+    fake: FakeCanvas, s: Seed, repo: Path
+) -> None:
+    """A delete that _current_file refuses must stop the push before other ops are applied."""
+    git(repo, "rm", "-q", "files/notes.txt")
+    meta = repo / "files/_meta.yaml"
+    meta.write_text(re.sub(r"  notes\.txt:\n(    .*\n)+", "", meta.read_text()))
+    page = repo / "pages/reading.md"
+    page.write_text(page.read_text() + "\nmore\n")
+    commit(repo)
+    replace_file(fake, s.notes["id"], b"newer")  # the id in the tree is stale now
+    fake.log.clear()
+    try:
+        result, _ = push(fake, repo)
+        assert not result.ok
+    except CanvasSyncError:
+        pass
+    assert writes(fake) == []  # the page edit was not applied either
+
+
+def test_mass_delete_needs_confirmation(fake: FakeCanvas, s: Seed, repo: Path) -> None:
+    git(repo, "rm", "-rq", "files", "modules.yaml", "pages/reading.md", "pages/gallery.md")
+    commit(repo)
+    fake.log.clear()
+    with pytest.raises(GuardBlocked, match="confirm-delete-files"):
+        push(fake, repo)
+    assert writes(fake) == []
+    result, out = push(fake, repo, confirmed={"--confirm-delete-files"})
+    assert result.ok, out
+    assert not fake.files

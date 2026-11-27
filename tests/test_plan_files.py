@@ -116,3 +116,17 @@ def test_plan_render_shows_risk() -> None:
     con.print(plan.render())
     text = con.export_text()
     assert "x.pdf" in text and "new Canvas file id" in text
+
+
+def test_mass_delete_carries_confirm_risk() -> None:
+    many = "files:\n" + "".join(
+        f'  f{i}.txt: {{canvas_id: {i + 10}, sha256: "{SHA_A}"}}\n' for i in range(8)
+    )
+    k = f'  k.txt: {{canvas_id: 99, sha256: "{SHA_B}"}}\n'
+    ops = diff_type(course(many + k), course("files:\n" + k))
+    assert len(ops) == 8
+    assert all(o.risks[0].needs_confirm == "--confirm-delete-files" for o in ops)
+    ops = diff_type(course(META), course(""))  # everything gone (two files)
+    assert len(ops) == 2 and all(o.risks for o in ops)
+    (op,) = diff_type(course(META), course(META.replace(Y_LINE, "")))  # one of two
+    assert op.risks == ()

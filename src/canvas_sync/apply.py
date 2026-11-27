@@ -13,7 +13,8 @@ Action -> writer call:
 - DELETE: ``delete(client, before, ctx)``
 
 A writer module may also define ``preflight(client, before, after, ctx)``: a read-only
-check run for every non-delete operation before anything is written.
+check run for every non-delete operation before anything is written, and
+``preflight_delete(client, before, ctx)`` likewise for every DELETE.
 
 Writers must send an explicit null for any field in ``op.changes`` whose new
 value is None (a cleared date).
@@ -133,6 +134,14 @@ def apply(
             check = getattr(_writer(op.key.kind, writers), "preflight", None)
             if check is not None:
                 check(client, op.before, op.after, ctx)
+        elif (
+            op.action is Action.DELETE
+            and op.before is not None
+            and (writers is None or op.key.kind in writers)
+        ):
+            dcheck = getattr(_writer(op.key.kind, writers), "preflight_delete", None)
+            if dcheck is not None:
+                dcheck(client, op.before, ctx)
 
     result = ApplyResult(done=[], failed=None, error=None)
     for op in plan.ops:

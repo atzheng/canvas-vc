@@ -479,6 +479,11 @@ def preflight(
     _current_file(client, ctx, old)
 
 
+def preflight_delete(client: CanvasClient, before: CanvasObject, ctx: ApplyContext) -> None:
+    """Read-only: the file to delete is the current one, in this course, at its path."""
+    _current_file(client, ctx, _entry(before))
+
+
 def create(client: CanvasClient, obj: CanvasObject, ctx: ApplyContext) -> int | str:
     """Upload a new file; returns its canvas_id. Settings are sent only if Canvas's new file
     differs from the wanted ones."""
