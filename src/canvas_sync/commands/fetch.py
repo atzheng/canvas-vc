@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import tempfile
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 
 import typer
@@ -75,6 +76,7 @@ def run_fetch(root: Path, client: CanvasClient, config: CourseConfig) -> FetchRe
     are the untracked roster cache and the blob store. ``config`` supplies the first fetch
     (clone) and the fallback; afterwards course.yaml and .canvasignore come from HEAD.
     """
+    started = datetime.now(UTC).isoformat(timespec="seconds")
     config, ignore = _committed_inputs(root, config)
     prev = gitops.ref_commit(root)
     previous = gitops.load_course_at(root, prev) if prev else None
@@ -93,6 +95,7 @@ def run_fetch(root: Path, client: CanvasClient, config: CourseConfig) -> FetchRe
     out = Bodies({p: r for p, r in bodies.entries.items() if p in live})
     changed = _changed(previous, course)
     commit = snapshot(root, course, out, ctx.blob_store, f"canvas fetch: {changed} changed")
+    gitops.record_fetch_time(root, started)  # lets `canvas status` do a cheap moved check
     return FetchResult(commit, changed)
 
 

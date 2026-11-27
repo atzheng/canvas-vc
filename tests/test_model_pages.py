@@ -168,3 +168,17 @@ def test_announcement_canvas_id_string_coerced(cfg: CourseConfig, tmp_path: Path
     write_files(tmp_path, {"announcements/a.md": "---\ncanvas_id: abc\n---\n"})
     with pytest.raises(ValidationError, match=r"announcements/a\.md"):
         ANNOUNCEMENT_SPEC.load(tmp_path, cfg)
+
+
+def test_page_id_is_tracked_after_canvas_id_and_optional(tmp_path: Path, cfg: CourseConfig) -> None:
+    (tmp_path / "pages").mkdir()
+    old = "---\ncanvas_id: intro\ntitle: Intro\n---\n\nhi\n"
+    new = "---\ncanvas_id: other\npage_id: 42\ntitle: Intro\n---\n\nhi\n"
+    (tmp_path / "pages" / "a.md").write_text(old)
+    (tmp_path / "pages" / "b.md").write_text(new)
+    objs = PAGE_SPEC.load(tmp_path, cfg)
+    assert objs["pages/a.md"].page_id is None  # type: ignore[attr-defined]
+    assert objs["pages/b.md"].page_id == 42  # type: ignore[attr-defined]
+    out = PAGE_SPEC.dump(objs, cfg)
+    assert out["pages/a.md"].decode() == old
+    assert out["pages/b.md"].decode() == new

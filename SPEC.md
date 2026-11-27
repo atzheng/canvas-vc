@@ -340,7 +340,8 @@ Test on a sandbox before building.
 
 ```markdown
 ---
-canvas_id: syllabus            # page URL slug on Canvas
+canvas_id: syllabus            # page URL slug on Canvas (changes when the title changes)
+page_id: 4821                  # Canvas's stable page id; fetch adds it
 title: Syllabus
 published: true
 publish_at: 2026-09-01 09:00
