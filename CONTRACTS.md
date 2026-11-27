@@ -942,7 +942,8 @@ Markdown bodies render with `markdown-it-py`, already a dependency.
 - Reads the tree through `model.course.load_tree` and `gitops`
   (`load_course_at`, `ahead_behind`, `read_tree_files`, `head_commit`,
   `ref_commit`, `operation_in_progress`, `conflict_marker_paths`,
-  `changed_paths`, `last_fetch_time`, and the read-only `repo_root`) only. No `gitops` function that changes
+  `changed_paths`, `last_fetch_time`, the read-only `repo_root`, and the read-only
+  `log_commits` / `CommitInfo` (`git --no-optional-locks log --name-only`, mbz.8)) only. No `gitops` function that changes
   refs, the index or the work tree (`update_ref`, `write_tree`,
   `commit_tree`, `merge`, `fast_forward`, `merge_with_output`,
   `record_fetch_time`, ...). The scan also forbids importing `subprocess`, `shutil`,
@@ -990,6 +991,17 @@ page with a one-line message, never a traceback):
 | `/files/raw/<path under files/>` | file bytes (`views/files.py`) | mbz.7 |
 | `/changes` | pending plan and history (`views/changes.py`) | mbz.8 |
 | `/static/ui.css` | stylesheet, the only static file | mbz.2 |
+
+**`/files/raw/<path>` rules** (`views/files.py`, tested). `<path>` (percent-decoded
+once by the server) is looked up as `files/<path>` among the loaded course's files
+entries (NFC-normalised as a fallback); no match, including `_meta.yaml`, is `404`.
+Only then is the file opened: `<root>/files` and every component below it must not be a
+symlink, the target must be a regular file whose resolved path is inside the resolved
+`<root>/files`; otherwise `404`. Bytes come from the working tree, never the blob store.
+Headers: `X-Content-Type-Options: nosniff`, `Content-Security-Policy: default-src 'none';
+style-src 'unsafe-inline'; sandbox`; PNG, JPEG, GIF, WebP and PDF are served inline with their
+guessed type; everything else (including SVG and HTML) is
+`application/octet-stream` with `Content-Disposition: attachment`.
 
 **Shared page layout** (`ui/layout.py`, created by mbz.2, used by all views):
 

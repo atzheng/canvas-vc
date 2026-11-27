@@ -159,8 +159,8 @@ Every date in the tree: assignment unlock/due/lock and override dates, page
 `publish_at`, announcement `post_at`, file unlock/lock (effective settings,
 including rules), module unlock. Grouped by ISO week (Monday start) in the
 course timezone, sorted within the week. Flags reuse the date checks of
-`validate` (factored into one function both call): lock before due, due before
-unlock, override outside the base window. Dates are displayed, never edited;
+`validate` (`commands.validate.date_problems`, a pure function both call): due after lock, unlock after due or lock,
+ambiguous fall-back times; each override date is checked the same way, plus override due after the base lock. Dates are displayed, never edited;
 filter by kind with `?kind=assignment`.
 
 ## 5. Files (`/files`, `/files/raw/<path>`) — bead mbz.7
@@ -183,8 +183,9 @@ sets them (rule or entry), backlinks (pages, assignments, announcements,
 module items) and an `unreferenced` badge, from the reference index.
 `/files/raw/<path>` serves the bytes of a regular, non-symlink file under the
 working tree's `files/` only (the path must be a key of the loaded tree),
-with `Content-Disposition: attachment` except for images and PDF, and
-`X-Content-Type-Options: nosniff`.
+inline only for PNG, JPEG, GIF, WebP and PDF; everything else (SVG and HTML
+included) is an attachment of type `application/octet-stream`; always with
+`X-Content-Type-Options: nosniff` (rules in CONTRACTS.md section 13).
 
 ## 6. Changes (`/changes`) — bead mbz.8
 
@@ -209,7 +210,8 @@ Pending operations come from `commands.diff.build_plan(root)` (the plan
 the flag each needs (named, never actionable). Below: unpushed commits (in
 `HEAD`, not in `canvas/main`) and recent `canvas/main` commits (`canvas
 fetch` / `canvas push` messages with times). With no `canvas/main` the page
-shows the never-fetched message. Uncommitted changes are listed from
+shows the never-fetched message. A plan error (`CanvasSyncError`) shows as one line. The page
+says it is as of the last fetch. History comes from the read-only `gitops.log_commits`. Uncommitted changes are listed from
 `changed_paths` and called out as not in the plan.
 
 ## Reference index (no page of its own) — bead mbz.3

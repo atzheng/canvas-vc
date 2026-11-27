@@ -448,3 +448,33 @@ def last_fetch_time(root: Path) -> str | None:
         return text
     commit = ref_commit(root)
     return _out(root, ["log", "-1", "--format=%cI", commit]) if commit else None
+
+
+@dataclass(frozen=True)
+class CommitInfo:
+    sha: str
+    time: str  # committer time, ISO 8601
+    subject: str
+    paths: tuple[str, ...]  # paths changed by the commit (none for a merge commit)
+
+
+def log_commits(
+    root: Path, rev: str, *, exclude: str | None = None, limit: int = 10
+) -> list[CommitInfo]:
+    """Newest-first commits of ``rev`` (not reachable from ``exclude``) with changed paths.
+
+    Read-only: one ``git log --name-only`` (``--no-optional-locks``); empty for a missing ``rev``.
+    """
+    args = ["--no-optional-locks", "-c", "core.quotepath=off", "log", f"--max-count={limit}"]
+    args += ["--no-renames", "--name-only", "--format=%x01%H%x1f%cI%x1f%s", rev]
+    if exclude:
+        args.append(f"^{exclude}")
+    args.append("--")
+    out = _run(root, args).stdout.decode(errors="replace")
+    commits: list[CommitInfo] = []
+    for chunk in out.split("\x01")[1:]:
+        head, _, rest = chunk.partition("\n")
+        sha, time, subject = (head.split("\x1f") + ["", ""])[:3]
+        paths = tuple(p for p in rest.split("\n") if p)
+        commits.append(CommitInfo(sha, time, subject, paths))
+    return commits
