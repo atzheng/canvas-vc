@@ -273,3 +273,59 @@ def test_reader_only_issues_gets_and_guard_fake_still_works(tmp_path: Path) -> N
     assert {r.method for r in fake.log} == {"GET"}
     g = guard_fake.add_assignment(fake, name="Guarded")
     assert fake.client("read").get_one(f"/courses/101/assignments/{g['id']}")["name"] == "Guarded"
+
+
+def test_student_ids_without_ints_skips_override_with_warning(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    fake = FakeCanvas()
+    a = add_assignment(fake, "Lab")
+    add_override(fake, a["id"], student_ids=["x", None])
+    obj = cast(Assignment, remote.read(fake.client(), ctx_for(tmp_path))["assignments/lab.md"])
+    assert obj.overrides == []
+    assert "assignments/lab.md: override with no usable student ids" in capsys.readouterr().err
+
+
+def test_invalid_assignment_gives_generic_path_only_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from pydantic import BaseModel
+
+    from canvas_sync.errors import ValidationError
+
+    class Strict(BaseModel):
+        n: int
+
+    def boom(**_: object) -> Assignment:
+        Strict(n="not a number")  # pyright: ignore[reportArgumentType]
+        raise AssertionError
+
+    monkeypatch.setattr(remote, "Assignment", boom)
+    fake = FakeCanvas()
+    add_assignment(fake, "Lab")
+    with pytest.raises(ValidationError) as e:
+        remote.read(fake.client(), ctx_for(tmp_path))
+    assert str(e.value) == "assignments/lab.md: Canvas data cannot be mirrored (invalid assignment)"
+
+
+def test_paths_kwarg_overrides_previous_for_links(tmp_path: Path) -> None:
+    fake = FakeCanvas()
+    add_assignment(
+        fake,
+        "Hw",
+        description='<p><a href="/courses/101/pages/syllabus">s</a></p>',
+    )
+    got = remote.read(
+        fake.client(), ctx_for(tmp_path), paths={(Kind.PAGE, "syllabus"): "pages/intro.md"}
+    )
+    assert cast(Assignment, got["assignments/hw.md"]).body == "[s](../pages/intro.md)\n"
+
+
+def test_new_path_collision_is_case_insensitive(tmp_path: Path) -> None:
+    fake = FakeCanvas()
+    add_assignment(fake, "Other")
+    new = add_assignment(fake, "Homework 1")
+    prev = previous_with({"assignments/Homework-1.md": Assignment(canvas_id=1, title="x")})
+    got = remote.read(fake.client(), ctx_for(tmp_path, previous=prev))
+    assert sorted(got) == ["assignments/homework-1-2.md", "assignments/other.md"]
+    assert cast(Assignment, got["assignments/homework-1-2.md"]).canvas_id == new["id"]

@@ -13,13 +13,14 @@ import unicodedata
 from collections.abc import Mapping
 from typing import Any, Literal, cast
 
+from pydantic import ValidationError as PydanticValidationError
 from rich.console import Console
 
 from canvas_sync.dates import from_canvas
 from canvas_sync.errors import ValidationError
 from canvas_sync.model.assignment import Assignment
 from canvas_sync.model.base import CanvasObject, Kind, ObjectKey
-from canvas_sync.model.overrides import Override
+from canvas_sync.model.overrides import Override, validate_overrides
 from canvas_sync.remote.context import ApplyContext, FetchContext
 from canvas_sync.remote.http import CanvasClient
 from canvas_sync.render.html2md import html_to_md
@@ -72,7 +73,7 @@ def _assign_paths(rows: list[dict[str, Any]], ctx: FetchContext) -> dict[int, st
             for key, o in ctx.previous.objects.items()
             if key.kind == Kind.ASSIGNMENT and o.canvas_id is not None
         }
-        taken = {k.path for k in ctx.previous.objects if k.kind == Kind.ASSIGNMENT}
+        taken = {k.path.casefold() for k in ctx.previous.objects if k.kind == Kind.ASSIGNMENT}
         for row in rows:
             path = by_id.get(int(row["id"]))
             if path is not None:
@@ -83,22 +84,28 @@ def _assign_paths(rows: list[dict[str, Any]], ctx: FetchContext) -> dict[int, st
             continue
         base = _slugify(str(row.get("name") or ""))
         path, n = f"{FOLDER}/{base}.md", 2
-        while path in taken:
+        while path.casefold() in taken:
             path, n = f"{FOLDER}/{base}-{n}.md", n + 1
-        taken.add(path)
+        taken.add(path.casefold())
         out[aid] = path
     return out
 
 
-def _known_paths(ctx: FetchContext, assignments: Mapping[int, str]) -> PathMap:
-    """(kind, canvas id) -> tree path, from the previous tree plus this read's assignments."""
-    known: dict[tuple[Kind, int | str], str] = {}
-    if ctx.previous is not None:
+def _known_paths(
+    ctx: FetchContext, assignments: Mapping[int, str], given: PathMap | None
+) -> PathMap:
+    """(kind, canvas id) -> tree path: ``given`` or else the previous tree, plus this read's
+    assignments (``given`` wins where it names one)."""
+    known: dict[tuple[Kind, int | str], str] = dict(given) if given is not None else {}
+    if given is None and ctx.previous is not None:
         for key, obj in ctx.previous.objects.items():
             if obj.canvas_id is not None:
                 known[(key.kind, obj.canvas_id)] = key.path
     for aid, path in assignments.items():
-        known[(Kind.ASSIGNMENT, aid)] = path
+        if given is None:
+            known[(Kind.ASSIGNMENT, aid)] = path
+        else:
+            known.setdefault((Kind.ASSIGNMENT, aid), path)
     return known
 
 
@@ -144,6 +151,9 @@ def _override(raw: dict[str, Any], ctx: FetchContext, where: str) -> Override | 
                 unknown += 1
                 ref = f"unknown:{n}"
             refs.append(ref)
+        if not refs:
+            _warn(f"{where}: override with no usable student ids is not mirrored")
+            return None
         if unknown:
             _warn(f"{where}: override names {unknown} student(s) not in the roster cache")
         keep = isinstance(title, str) and title and not _AUTO_TITLE.fullmatch(title)
@@ -179,12 +189,16 @@ def _group_names(client: CanvasClient, course: int) -> dict[int, str]:
     return out
 
 
-def read(client: CanvasClient, ctx: FetchContext) -> dict[str, CanvasObject]:
+def read(
+    client: CanvasClient, ctx: FetchContext, *, paths: PathMap | None = None
+) -> dict[str, CanvasObject]:
     """Assignments keyed by tree path (``assignments/<slug>.md``).
 
     Existing assignments keep the path they have in ``ctx.previous`` (matched by
     ``canvas_id``); new ones get ``_slugify(title)`` with ``-2``, ``-3`` on collision.
-    Assignments matched by ``.canvasignore`` are left out.
+    Assignments matched by ``.canvasignore`` are left out. ``paths`` maps (kind, id) to tree
+    paths (pages by url slug, others by id) for rewriting links in bodies; default: the
+    previous tree.
     """
     course = ctx.config.course_id
     groups = _group_names(client, course)
@@ -193,12 +207,12 @@ def read(client: CanvasClient, ctx: FetchContext) -> dict[str, CanvasObject]:
         {**_PER_PAGE, "include[]": "overrides", "override_assignment_dates": "false"},
     )
     rows = [r for r in rows if _is_mirrored(r)]
-    paths = _assign_paths(rows, ctx)
-    known = _known_paths(ctx, paths)
+    tree_paths = _assign_paths(rows, ctx)
+    known = _known_paths(ctx, tree_paths, paths)
     previous = ctx.previous.objects if ctx.previous is not None else {}
     out: dict[str, CanvasObject] = {}
     for raw in rows:
-        path = paths[int(raw["id"])]
+        path = tree_paths[int(raw["id"])]
         if ctx.ignore.ignored(path):
             continue
         prev = previous.get(ObjectKey(Kind.ASSIGNMENT, path))
@@ -235,6 +249,12 @@ def _assignment(
         }
     )
     try:
+        validate_overrides(overrides)
+    except ValidationError:
+        raise ValidationError(
+            f"{path}: Canvas overrides cannot be mirrored (a target is in more than one override)"
+        ) from None
+    try:
         return Assignment(
             canvas_id=int(raw["id"]),
             title=str(raw.get("name") or ""),
@@ -251,10 +271,10 @@ def _assignment(
             body=body,
             **base,
         )
-    except ValidationError:
-        # Not echoed: the message would name students.
+    except (ValidationError, PydanticValidationError):
+        # Not echoed: the messages can name students.
         raise ValidationError(
-            f"{path}: Canvas overrides cannot be mirrored (a target is in more than one override)"
+            f"{path}: Canvas data cannot be mirrored (invalid assignment)"
         ) from None
 
 
