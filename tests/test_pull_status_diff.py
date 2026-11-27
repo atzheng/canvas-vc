@@ -47,14 +47,6 @@ def git(root: Path, *args: str) -> str:
     return proc.stdout
 
 
-@pytest.fixture(autouse=True)
-def _files_differ_stub(monkeypatch: pytest.MonkeyPatch) -> None:
-    """plan/files.py is still a stub on this branch's base; files are not under test here."""
-    from canvas_sync.plan import files
-
-    monkeypatch.setattr(files, "diff_type", lambda base, target: [])
-
-
 @pytest.fixture
 def fake() -> FakeCanvas:
     f = FakeCanvas()
