@@ -224,6 +224,8 @@ Per-type fields (frontmatter key = field name unless noted; all dates `LocalDT |
   - Map every Canvas item type other than page/assignment/file/header/url/quiz/discussion to an `unmanaged` item **at its position** (never skip it, never reorder); never raise on an unknown type.
   - Unmanaged item fields: item `id` -> `canvas_id`; `title`, `indent`, `published` -> the item's own fields; `type` -> `unmanaged.type`; `content_id` -> `unmanaged.content_id`; `external_url` -> `unmanaged.external_url` (absent on Canvas -> `None`).
   - Module wire fields: `prerequisite_module_ids` -> `prerequisites` (ids verbatim, Canvas order); `completion_requirements[]` `{id, type, min_score, completed}` -> `{item_id: id, type, min_score}` (drop `completed`, it is per-student state); `require_sequential_progress` as-is.
+  - Page, assignment and file items whose target is not in the reader's `paths` map (the object is `.canvasignore`d or otherwise not fetched) also become `unmanaged` items at their position, with `unmanaged.type` = `Page`/`Assignment`/`File`, `content_id` = Canvas `content_id` (absent for pages, whose slug is only in the warning), and a one-line warning `modules.yaml: <module>: items[j]: <kind> <id> is not in the course tree, kept as unmanaged`. The differ treats them like any other `unmanaged` item.
+  - Item titles: `page`/`assignment` items carry no `title`; `file` items carry it only when it differs from the file's basename; `url`, `quiz`, `discussion`, `unmanaged` items carry Canvas's title. Module overrides are not read in v1.
   Rules the differ (`plan/modules.py`) MUST follow:
   - **Never emit CREATE, UPDATE, DELETE or move for an `unmanaged` item**, and never write `prerequisites`, `require_sequential_progress` or `completion_requirements` (read-only in v1). They are excluded from the comparison. A hand-written `unmanaged` item whose `canvas_id` does not exist on Canvas is ignored (no CREATE).
   - Positions of managed items are computed over the **full item list, unmanaged items included**; unmanaged items are fixed anchors matched by `canvas_id`. Reordering an unmanaged item locally is ignored.
@@ -501,6 +503,9 @@ class ApplyContext:
     guard: SubmissionGuard
     blobs: BlobStore
 ```
+
+`remote/modules.py`: `read(client, ctx, *, paths: Mapping[tuple[Kind, int | str], str] | None = None) -> list[Module]`.
+`paths` maps (kind, id) to the ref a module item uses: pages by Canvas `page_url` slug (module items carry no page id), assignments by assignment id, files by file id; values are `syllabus`, `hw1`, `lectures/01.pdf` (no folder or extension; files relative to `files/`). `fetch_course` builds it from the already-read pages, assignments and files, so it must read those before modules. With `paths=None` the reader derives it from `ctx.previous`. Targets absent from the map become `unmanaged` items (section 4). GET only.
 
 `remote/roster.py`: `read(client, ctx, *, aliases: Mapping[str, str] | None = None) -> RosterCache`
 (not `Roster`: `Roster` comes from the tracked `roster.yaml`). Refs follow `student_ref`
