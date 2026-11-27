@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 from urllib.parse import quote
 
@@ -66,16 +67,18 @@ def _match_renamed(
                 break
 
 
-def read(client: CanvasClient, ctx: FetchContext) -> dict[str, CanvasObject]:
-    """Pages keyed by tree path (GET only).
+def assign_paths(client: CanvasClient, ctx: FetchContext) -> dict[str, str]:
+    """Page url slug -> tree path for every page on Canvas (list calls, no bodies).
 
-    ``Page.canvas_id`` is the page's current Canvas ``url`` slug; module items and links
-    use it, so ``fetch_course`` can build its ``(Kind.PAGE, slug) -> ref`` map from the
-    result. Pages in ``ctx.previous`` keep their tree path, matched by slug and, when
-    the slug changed on Canvas, by ``page_id`` (see ``_match_renamed``). New pages get
-    ``pages/<slugify(title)>.md`` (``-2``, ``-3`` on collision, also against kept paths).
-    Pages matched by ``.canvasignore`` are dropped.
+    fetch_course uses it in its id/path pre-pass. ``read`` computes the same assignment.
     """
+    return _plan(client, ctx)[0]
+
+
+def _plan(
+    client: CanvasClient, ctx: FetchContext
+) -> tuple[dict[str, str], dict[str, str], dict[str, CanvasObject]]:
+    """(slug -> path, slug -> path for pages matched to a previous object, previous)."""
     cid = ctx.config.course_id
     listing: list[dict[str, Any]] = client.get(f"/courses/{cid}/pages")
     remote = {str(p["url"]): p for p in sorted(listing, key=lambda p: p.get("page_id") or 0)}
@@ -93,7 +96,25 @@ def read(client: CanvasClient, ctx: FetchContext) -> dict[str, CanvasObject]:
         if slug not in assigned:
             assigned[slug] = unique_path(FOLDER, str(raw.get("title") or slug), taken)
             taken.add(assigned[slug])
+    return assigned, claimed, previous
 
+
+def read(
+    client: CanvasClient,
+    ctx: FetchContext,
+    *,
+    paths: Mapping[tuple[Kind, int | str], str] | None = None,
+) -> dict[str, CanvasObject]:
+    """Pages keyed by tree path (GET only).
+
+    ``Page.canvas_id`` is the page's current Canvas ``url`` slug; module items and links
+    use it. Pages in ``ctx.previous`` keep their tree path, matched by slug and, when
+    the slug changed on Canvas, by ``page_id`` (see ``_match_renamed``). New pages get
+    ``pages/<slugify(title)>.md`` (see ``assign_paths``). Pages matched by
+    ``.canvasignore`` are dropped. ``paths`` is the complete ``(kind, id) -> tree path``
+    map from fetch_course (pages by slug); links resolve through it when given.
+    """
+    assigned, claimed, previous = _plan(client, ctx)
     read_ids: dict[tuple[Kind, int | str], str] = {(Kind.PAGE, s): p for s, p in assigned.items()}
     out: dict[str, CanvasObject] = {}
     for slug, path in sorted(assigned.items(), key=lambda kv: kv[1]):
@@ -103,7 +124,7 @@ def read(client: CanvasClient, ctx: FetchContext) -> dict[str, CanvasObject]:
         if full is None:
             _warn(f"{path}: page {slug} disappeared during fetch, skipped")
             continue
-        prev = previous.get(path)
+        prev = previous.get(path) if slug in claimed else None
         body, fmt = read_body(
             ctx,
             path,
@@ -111,6 +132,7 @@ def read(client: CanvasClient, ctx: FetchContext) -> dict[str, CanvasObject]:
             prev.body if isinstance(prev, Page) else None,
             prev.body_format if isinstance(prev, Page) else None,
             read_ids,
+            paths,
         )
         out[path] = Page(
             canvas_id=slug,

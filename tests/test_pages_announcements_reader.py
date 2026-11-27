@@ -204,3 +204,44 @@ def test_renamed_announcement_keeps_path_and_body(tmp_path: Path) -> None:
 
 def test_object_key_kinds() -> None:
     assert ObjectKey(Kind.PAGE, "pages/a.md").kind == Kind.PAGE
+
+
+def test_slugify_caps_length_and_unique_path_ignores_case() -> None:
+    assert len(slugify("word " * 50)) <= 80
+    assert unique_path("pages", "Intro", {"pages/INTRO.md"}) == "pages/intro-2.md"
+
+
+def test_new_object_does_not_inherit_deleted_objects_body_format(tmp_path: Path) -> None:
+    fake = FakeCanvas()
+    add_page(fake, "Layout", "<p>fresh <em>page</em></p>")
+    prev = Page(canvas_id="deleted", title="Layout", published=True, body_format="html", body="x")
+    got = pages.read(fake.client("read"), ctx_for(tmp_path, {"pages/layout.md": prev}))
+    page = got["pages/layout.md"]
+    assert isinstance(page, Page)
+    assert page.body_format == "md" and page.body == "fresh *page*"
+    assert pages.assign_paths(fake.client("read"), ctx_for(tmp_path)) == {
+        "layout": "pages/layout.md"
+    }
+
+
+def test_paths_map_overrides_previous_for_links(tmp_path: Path) -> None:
+    fake = FakeCanvas()
+    home = add_page(fake, "Home")
+    home["body"] = '<p><a href="/courses/101/assignments/55">hw</a></p>\n'
+    paths: dict[tuple[Kind, int | str], str] = {
+        (Kind.PAGE, "home"): "pages/home.md",
+        (Kind.ASSIGNMENT, 55): "assignments/hw-one.md",
+    }
+    got = pages.read(fake.client("read"), ctx_for(tmp_path), paths=paths)
+    page = got["pages/home.md"]
+    assert isinstance(page, Page) and page.body == "[hw](../assignments/hw-one.md)"
+
+
+def test_stale_previous_ids_dropped_without_paths(tmp_path: Path) -> None:
+    fake = FakeCanvas()
+    home = add_page(fake, "Home")
+    home["body"] = '<p><a href="/courses/101/pages/gone">g</a></p>\n'
+    prev = Page(canvas_id="gone", title="Gone", published=True, body="g")
+    got = pages.read(fake.client("read"), ctx_for(tmp_path, {"pages/gone.md": prev}))
+    page = got["pages/home.md"]
+    assert isinstance(page, Page) and "gone.md" not in page.body
