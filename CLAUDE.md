@@ -111,8 +111,11 @@ These exist once the scaffold bead is merged.
 
 The remote is `origin` (GitHub). Bead work goes through a pull request on a
 branch named after the bead (`canvas-sync-<id>`). Don't push bead work
-straight to `main`. Bead-state-only commits (`.beads/`) may go straight to
-`main`.
+straight to `main`.
+
+`.beads/` is not tracked in git and the beads git hooks are off
+(`core.hooksPath` unset). Bead state lives only in the coordinator's local
+Dolt DB; `bd export -o .beads/issues.jsonl` writes a local backup.
 
 ## Multi-agent workflow
 
@@ -131,7 +134,9 @@ changes bead state.
     for high-risk beads (below) or when a change touches `CONTRACTS.md`.
 - **Implementer** (Sonnet subagent, own git worktree, one bead):
   - builds the bead per "Working a bead" below and opens the PR;
-  - never runs `bd`: notes, follow-ups and contract changes go in the PR body.
+  - never runs `bd`, not even `bd show`: the coordinator pastes the bead's
+    description, design, acceptance and notes into the brief. Notes,
+    follow-ups and contract changes go in the PR body.
 - **Reviewer** (Sonnet subagent, one PR):
   - reviews independently and does not see the implementer's report;
   - never merges or edits the branch.
@@ -191,8 +196,9 @@ for what they need rather than starting an implementer.
   subagent whose worktree was removed cannot be resumed with SendMessage.
 - After a merge, remove the worktrees and delete the local branches.
 
-**Bead state.** Do not silence `bd` output: a failed `bd close` otherwise goes
-unnoticed.
+**Bead state.** Only the coordinator runs `bd`, and only from the main
+checkout, never inside a worktree. Do not silence `bd` output: a failed
+`bd close` otherwise goes unnoticed.
 
 **Keeping the coordinator lean.** Fix environment problems once, before
 starting agents, and pass known pitfalls in each brief. Trim command output.
@@ -200,11 +206,12 @@ Start a fresh coordinator session every few rounds; beads holds the state.
 
 ## Working a bead
 
-Implementer subagents skip the `bd` steps (2 and 7): the coordinator claims
-and closes, and blockers or follow-ups go in the PR body or the final report.
+Implementer subagents skip the `bd` steps (1's `bd show`, 2 and 7): the
+coordinator gives them the bead text, claims and closes, and blockers or
+follow-ups go in the PR body or the final report.
 
-1. `bd show <id>` and read all of it: description, design, acceptance. Then
-   read the sections of `SPEC.md` and `CONTRACTS.md` it names.
+1. `bd show <id>` (or the bead text in your brief) and read all of it:
+   description, design, acceptance. Then read the sections of `SPEC.md` and `CONTRACTS.md` it names.
 2. `bd update <id> --claim`.
 3. Build only what the bead describes. Its design notes list the files it
    owns; avoid editing files owned by other beads. If you must, keep the

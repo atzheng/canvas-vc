@@ -11,3 +11,6 @@ __pycache__/
 .ruff_cache/
 dist/
 .hypothesis/
+
+# Beads: managed only by the coordinator, not tracked in git
+.beads/
