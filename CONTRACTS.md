@@ -578,7 +578,10 @@ raises `GuardBlocked` if any `Risk.needs_confirm` flag is not in `confirmed`
 operation before the first write (a refusal raises `GuardBlocked` with nothing
 written), then again immediately before each guarded write, for live state.
 `assert_allowed` must therefore be idempotent. An operation is guarded
-(`apply.needs_guard`) if its key kind is ASSIGNMENT, or if `Operation.touches_assignment`
+(`apply.needs_guard`) if its key kind is ASSIGNMENT, if it is an ANNOUNCEMENT CREATE or UPDATE (the
+guard re-derives the notify-students risk from the op and a clock, with no
+network call, so `--confirm-notify` holds even if the differ omitted the static
+risk), or if `Operation.touches_assignment`
 is set; module differs set it on ops that change `published` on, or add or
 remove, an item whose content is an assignment. A `GuardBlocked` in the
 just-in-time pass is returned in `ApplyResult.error` (with `done`/`failed`), not
