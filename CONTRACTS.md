@@ -769,7 +769,19 @@ def read_tree_files(root, commit: str) -> dict[str, bytes]   # for loading canva
 def load_course_at(root, commit: str) -> Course             # load_tree over a commit's files
 def merge(root, ref=REMOTE_REF, rebase=False) -> int        # runs git merge/rebase in the work tree; returns exit code
 def fast_forward(root, ref=REMOTE_REF) -> bool             # git merge --ff-only; False if not possible
+def merge_with_output(root, ref=REMOTE_REF, rebase=False) -> tuple[int, str]  # merge + git's one-line message
+def ahead_behind(root, ref=REMOTE_REF) -> tuple[int, int]   # (HEAD-only, ref-only) commit counts
+def changed_paths(root) -> list[str]                        # tracked files with staged/unstaged changes
+def record_fetch_time(root, when_iso: str) -> None          # run_fetch writes the fetch start time
+def last_fetch_time(root) -> str | None                     # .git/canvas-last-fetch, else canvas/main commit time
 ```
+
+**Plan for push and diff.** `commands/diff.py: build_plan(root) -> Plan` is
+`plan.core.diff(load_course_at(canvas/main), load_course_at(HEAD))`; `canvas diff` prints
+`plan.render()`. `push` should call the same function (it raises `CanvasSyncError` when
+canvas/main or HEAD is missing). `canvas status` reports the remote-moved check from
+GET list calls (pages, assignments, announcements) whose `updated_at` is later than
+`last_fetch_time`; modules and files are not part of this cheap check.
 
 ```python
 # snapshot.py
