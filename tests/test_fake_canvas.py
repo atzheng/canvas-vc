@@ -104,7 +104,7 @@ def test_unknown_get_is_404_and_unknown_write_fails_test(fake: FakeCanvas) -> No
         client.get_one(f"/courses/{C}/pages/nope")
     assert err.value.status == 404
     with pytest.raises(FakeCanvasError, match="no route"):
-        client.post(f"/courses/{C}/assignment_groups", json={"name": "x"})
+        client.post(f"/courses/{C}/folders", json={"name": "x"})
 
 
 def test_missing_auth_is_401(fake: FakeCanvas) -> None:
@@ -136,11 +136,11 @@ def test_resource_modules_can_plug_in_routes(fake: FakeCanvas) -> None:
             raise CanvasError(404, "missing")
         return topics[q.match.group(1)]
 
-    fake.route("POST", r"/courses/{c}/assignment_groups", create)
-    fake.route("GET", r"/courses/{c}/assignment_groups/(\d+)", get)
+    fake.route("POST", r"/courses/{c}/folders", create)
+    fake.route("GET", r"/courses/{c}/folders/(\d+)", get)
     client = fake.client("write")
-    client.post(f"/courses/{C}/assignment_groups", json={"message": "<p>Hi<br></p>"})
-    assert client.get_one(f"/courses/{C}/assignment_groups/7")["message"] == "<p>Hi<br /></p>\n"
+    client.post(f"/courses/{C}/folders", json={"message": "<p>Hi<br></p>"})
+    assert client.get_one(f"/courses/{C}/folders/7")["message"] == "<p>Hi<br /></p>\n"
 
 
 def test_sanitizer_is_stable_and_not_identity() -> None:

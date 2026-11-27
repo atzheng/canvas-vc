@@ -9,7 +9,7 @@ from typing import Any, cast
 import pytest
 
 from canvas_sync.apply import ApplyResult, apply
-from canvas_sync.errors import GuardBlocked
+from canvas_sync.errors import GuardBlocked, ValidationError
 from canvas_sync.model.announcement import Announcement
 from canvas_sync.model.base import CanvasObject, Kind, ObjectKey
 from canvas_sync.model.course import Course
@@ -381,3 +381,32 @@ def test_announcement_delete_writer_unpublishes() -> None:
 
 def test_operation_type_hint() -> None:
     assert Operation  # keep the import used for type checkers
+
+
+def test_duplicate_page_canvas_id_in_target_is_refused() -> None:
+    base = course({"pages/a.md": Page(canvas_id="a", title="A")})
+    target = course(
+        {
+            "pages/a.md": Page(canvas_id="a", title="A"),
+            "pages/a-copy.md": Page(canvas_id="a", title="Copy", body="x"),
+        }
+    )
+    with pytest.raises(ValidationError, match="pages/a.md.*pages/a-copy.md"):
+        diff(base, target, differs())
+
+
+def test_duplicate_announcement_canvas_id_in_target_is_refused() -> None:
+    base = course({"announcements/a.md": ann(canvas_id=5)})
+    target = course(
+        {"announcements/a.md": ann(canvas_id=5), "announcements/b.md": ann(canvas_id=5, body="x")}
+    )
+    with pytest.raises(ValidationError, match="announcements/b.md.*announcements/a.md"):
+        diff(base, target, differs())
+
+
+def test_deleting_the_front_page_without_replacement_is_refused() -> None:
+    base = course({"pages/h.md": Page(canvas_id="h", title="H", front_page=True)})
+    with pytest.raises(ValidationError, match="pages/h.md: is the course front page"):
+        diff(base, course({}), differs())
+    other = course({"pages/o.md": Page(canvas_id="o", title="O", front_page=True)})
+    assert ops_of(diff(base, other, differs()))[-1] == (Action.DELETE, "pages/h.md")

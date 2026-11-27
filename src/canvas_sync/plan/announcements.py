@@ -20,6 +20,7 @@ from datetime import UTC, datetime
 
 from rich.console import Console
 
+from canvas_sync.errors import ValidationError
 from canvas_sync.model.announcement import Announcement
 from canvas_sync.model.base import Kind, ObjectKey
 from canvas_sync.model.course import Course
@@ -55,6 +56,15 @@ def posted_now(a: Announcement, now: datetime) -> bool:
 
 def _pair(base: dict[str, Announcement], target: dict[str, Announcement]) -> dict[str, str]:
     by_id = {o.canvas_id: p for p, o in base.items() if o.canvas_id is not None}
+    seen: dict[object, str] = {}
+    for path, obj in sorted(target.items()):
+        if obj.canvas_id is None:
+            continue
+        if obj.canvas_id in seen:
+            raise ValidationError(
+                f"{path}: duplicate canvas_id {obj.canvas_id!r} (also in {seen[obj.canvas_id]})"
+            )
+        seen[obj.canvas_id] = path
     pairs: dict[str, str] = {}
     used: set[str] = set()
     for path, obj in sorted(target.items()):

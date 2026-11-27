@@ -9,10 +9,14 @@ no other change produces nothing.
 ``after`` is a ``PlacedPage`` (a ``Page`` plus ``key_path``, the operation's key path) so
 the writer can record the body and the new slug under the right key. ``published: None``
 in the target means "no opinion": it never produces a change.
+
+Deleting the current front page when no target page has ``front_page`` raises a
+``ValidationError`` at plan time (Canvas refuses it with a 400 mid-push).
 """
 
 from __future__ import annotations
 
+from canvas_sync.errors import ValidationError
 from canvas_sync.model.base import Kind, ObjectKey
 from canvas_sync.model.course import Course
 from canvas_sync.model.page import Page
@@ -40,6 +44,15 @@ def _placed(page: Page, path: str, canvas_id: str | int | None) -> PlacedPage:
 def _pair(base: dict[str, Page], target: dict[str, Page]) -> dict[str, str]:
     """Target path -> base path for objects that exist on both sides."""
     by_id = {str(o.canvas_id): p for p, o in base.items() if o.canvas_id is not None}
+    seen: dict[object, str] = {}
+    for path, obj in sorted(target.items()):
+        if obj.canvas_id is None:
+            continue
+        if obj.canvas_id in seen:
+            raise ValidationError(
+                f"{path}: duplicate canvas_id {obj.canvas_id!r} (also in {seen[obj.canvas_id]})"
+            )
+        seen[obj.canvas_id] = path
     pairs: dict[str, str] = {}
     used: set[str] = set()
     for path, obj in sorted(target.items()):
@@ -78,5 +91,9 @@ def diff_type(base: Course, target: Course) -> list[Operation]:
     paired = set(pairs.values())
     for path, old in sorted(b.items()):
         if path not in paired:
+            if old.front_page and not any(o.front_page for o in t.values()):
+                raise ValidationError(
+                    f"{path}: is the course front page; set front_page on another page first"
+                )
             ops.append(Operation(ObjectKey(Kind.PAGE, path), Action.DELETE, old, None, {}))
     return ops

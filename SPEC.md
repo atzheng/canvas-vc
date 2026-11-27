@@ -532,7 +532,8 @@ and is unchanged.
 - Deleting a local file and pushing deletes the Canvas object, except that:
   - assignments with submissions are never deleted: `push` refuses, writing
     nothing (see above)
-  - posted announcements are unpublished instead
+  - announcements are never deleted: deleting the file unpublishes a published
+    one (with a warning); one that is already unpublished is a no-op with a warning
 - An object deleted **on Canvas** shows up after `pull` as a deletion in the
   merge. If you also edited it locally, git reports a modify/delete conflict.
 - `push --no-delete` turns all deletions into unpublishes.
