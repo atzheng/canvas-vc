@@ -19,8 +19,19 @@ def merge_canvas(root: Path, rebase: bool, console: Console) -> bool:
     """Merge (or rebase onto) canvas/main; git decides what is allowed. True if clean.
 
     Prints one line per problem: ``CONFLICT: <path>`` per unmerged path, or git's own
-    message when it refused (e.g. a dirty tree). Never touches canvas/main.
+    message and the files it lists when it refused (e.g. a dirty tree). The fetch step
+    has already updated canvas/main by then, even if the merge is refused; this function
+    itself never touches it.
     """
+    pending = gitops.operation_in_progress(root)
+    if pending or gitops.unmerged_paths(root):
+        console.print(
+            f"{pending or 'merge'} in progress: finish it (git commit / git rebase --continue) "
+            "or abort it first",
+            markup=False,
+            highlight=False,
+        )
+        return False
     ref = gitops.ref_commit(root)
     if ref is None:
         console.print("no canvas/main yet; nothing to merge", highlight=False)

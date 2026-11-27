@@ -24,6 +24,9 @@ _CHECKS: tuple[tuple[str, str, dict[str, str]], ...] = (
 )
 
 
+DIRTY_NOTE = "note: the plan is from committed HEAD; uncommitted edits are not included"
+
+
 def _parse(stamp: str) -> datetime | None:
     try:
         when = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
@@ -62,7 +65,7 @@ def local_lines(root: Path) -> list[str]:
     lines.extend(
         f"conflict markers: {p}" for p in gitops.conflict_marker_paths(root) if p not in unmerged
     )
-    lines.extend(f"uncommitted: {p}" for p in gitops.changed_paths(root))
+    lines.extend(f"uncommitted: {p}" for p in gitops.changed_paths(root) if p not in unmerged)
     if gitops.ref_commit(root) is None:
         lines.append("canvas/main: not fetched yet; run `canvas fetch`")
         return lines
@@ -76,8 +79,8 @@ def unpushed_lines(root: Path) -> list[str]:
     """One line per operation push would perform; a single line if the plan cannot be built."""
     try:
         plan = build_plan(root)
-    except CanvasSyncError as e:
-        return [f"cannot compute plan: {e}"]
+    except (CanvasSyncError, NotImplementedError) as e:
+        return [f"cannot compute plan: {e or type(e).__name__}"]
     return [f"{op.action.value} {op.key.path}" for op in plan.ops]
 
 
@@ -113,6 +116,8 @@ def status() -> None:
         for line in local_lines(root):
             console.print(line, markup=False, highlight=False)
         if gitops.ref_commit(root) is not None and gitops.head_commit(root) is not None:
+            if gitops.changed_paths(root):
+                console.print(DIRTY_NOTE, markup=False, highlight=False)
             for line in unpushed_lines(root):
                 console.print(f"to push: {line}", markup=False, highlight=False)
         console.print(_remote_line(root), markup=False, highlight=False)

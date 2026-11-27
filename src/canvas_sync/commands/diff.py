@@ -31,7 +31,15 @@ def diff() -> None:
     """Show the API-level plan that push would carry out."""
     try:
         root = gitops.repo_root(Path.cwd())
-        Console().print(build_plan(root).render(), highlight=False)
-    except CanvasSyncError as e:
-        Console(stderr=True).print(f"error: {e}", markup=False, highlight=False)
+        console = Console()
+        plan = build_plan(root)
+        if gitops.changed_paths(root):
+            console.print(
+                "note: the plan is from committed HEAD; uncommitted edits are not included",
+                markup=False,
+                highlight=False,
+            )
+        console.print(plan.render(), highlight=False)
+    except (CanvasSyncError, NotImplementedError) as e:
+        Console(stderr=True).print(f"error: {e or type(e).__name__}", markup=False, highlight=False)
         raise typer.Exit(1) from None

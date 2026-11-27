@@ -290,7 +290,28 @@ def merge_with_output(root: Path, ref: str = REMOTE_REF, rebase: bool = False) -
     proc = _run(root, args, ok=tuple(range(256)))
     err = [ln.strip() for ln in proc.stderr.decode(errors="replace").splitlines() if ln.strip()]
     out = [ln.strip() for ln in proc.stdout.decode(errors="replace").splitlines() if ln.strip()]
-    return proc.returncode, (err[0] if err else out[-1] if out else "")
+    msg = err[0] if err else out[-1] if out else ""
+    # git lists the files it refuses to overwrite as tab-indented lines.
+    listed = [
+        ln.strip()
+        for ln in proc.stderr.decode(errors="replace").splitlines()
+        if ln.startswith(("\t", " " * 4)) and ln.strip()
+    ]
+    if listed:
+        msg += f" [{', '.join(listed)}]"
+    return proc.returncode, msg
+
+
+def operation_in_progress(root: Path) -> str | None:
+    """``"merge"`` or ``"rebase"`` if one is unfinished in this work tree, else None."""
+    for name, what in (
+        ("MERGE_HEAD", "merge"),
+        ("rebase-merge", "rebase"),
+        ("rebase-apply", "rebase"),
+    ):
+        if Path(_out(root, ["rev-parse", "--path-format=absolute", "--git-path", name])).exists():
+            return what
+    return None
 
 
 def merge(root: Path, ref: str = REMOTE_REF, rebase: bool = False) -> int:
