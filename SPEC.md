@@ -505,11 +505,17 @@ code by four independent layers, not left to good intentions.
    removal), the tool re-fetches the assignment and checks
    `has_submitted_submissions` / `graded_submissions_exist`. It doesn't trust
    the snapshot, which may be minutes old.
-3. **Delete is never forced.** A local delete of an assignment that has
-   submissions turns into: keep it on Canvas, unpublish it if Canvas allows,
-   and add it to `.canvasignore`, with a message explaining this. There's no
-   `--force` that overrides this. Deleting such an assignment is something
-   you do in the Canvas UI on purpose.
+3. **Delete is never forced.** The plan cannot know whether an assignment
+   has submissions (it compares two trees), so a local delete is planned as a
+   delete and the guard decides at apply time from live Canvas state. If the
+   assignment has any submission, `push` stops **before writing anything**
+   (nothing else in the push is applied either) with a one-line message naming
+   the file. Nothing is unpublished (Canvas refuses to unpublish an assignment
+   with submissions, so it is not attempted). To resolve it, restore the file
+   (`git checkout -- assignments/hw1.md`), or add its path to `.canvasignore`
+   and fetch, which stops tracking it. There's no `--force` that overrides
+   this. Deleting such an assignment is something you do in the Canvas UI on
+   purpose.
 4. **Backup before every push.** Before applying, `push` saves a full export
    of submissions metadata, grades and comments for every assignment it will
    touch to `~/.canvas-sync/backups/<course>/<timestamp>.json`, outside the
@@ -524,7 +530,8 @@ and is unchanged.
 ## Deletion rules
 
 - Deleting a local file and pushing deletes the Canvas object, except that:
-  - assignments with submissions are never deleted (see above)
+  - assignments with submissions are never deleted: `push` refuses, writing
+    nothing (see above)
   - posted announcements are unpublished instead
 - An object deleted **on Canvas** shows up after `pull` as a deletion in the
   merge. If you also edited it locally, git reports a modify/delete conflict.

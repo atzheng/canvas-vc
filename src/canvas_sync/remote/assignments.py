@@ -1,5 +1,10 @@
 """Assignments reader and writer (CONTRACTS.md section 8).
 
+Writer: ``create`` / ``update`` / ``delete`` for assignments and (create only) assignment groups.
+Updates send only the fields that changed; assignment POST/PUT bodies never contain
+``assignment_overrides`` (Canvas replaces the whole override set with it). Override writes are
+orx.9's job, see ``_require_no_override_change``.
+
 Reader (GET only): assignments with their group name, overrides resolved through the
 ``RosterCache`` to section/group names and student refs, and bodies as for pages
 (``Bodies.matches`` reuses the previous Markdown, else ``html_to_md``). Quiz, discussion and
@@ -16,15 +21,23 @@ from typing import Any, Literal, cast
 from pydantic import ValidationError as PydanticValidationError
 from rich.console import Console
 
-from canvas_sync.dates import from_canvas
-from canvas_sync.errors import ValidationError
+from canvas_sync.dates import from_canvas, to_canvas
+from canvas_sync.errors import CanvasSyncError, GuardBlocked, ValidationError
 from canvas_sync.model.assignment import Assignment
 from canvas_sync.model.base import CanvasObject, Kind, ObjectKey
 from canvas_sync.model.overrides import Override, validate_overrides
+from canvas_sync.plan.assignments import (
+    OVERRIDE_FIELDS,
+    AssignmentGroup,
+    assignment_changes,
+    group_key,
+)
+from canvas_sync.plan.core import Action, Operation
 from canvas_sync.remote.context import ApplyContext, FetchContext
 from canvas_sync.remote.http import CanvasClient
 from canvas_sync.render.html2md import html_to_md
 from canvas_sync.render.links import LinkContext
+from canvas_sync.render.md2html import md_to_html
 
 FOLDER = "assignments"
 _PER_PAGE = {"per_page": 100}
@@ -278,18 +291,156 @@ def _assignment(
         ) from None
 
 
+# ---- writer ---------------------------------------------------------------------------
+
+
+def _asg(obj: CanvasObject) -> Assignment:
+    if not isinstance(obj, Assignment):
+        raise TypeError(f"expected an Assignment, got {type(obj).__name__}")
+    return obj
+
+
+def _canvas_id(a: Assignment) -> int:
+    if a.canvas_id is None or isinstance(a.canvas_id, str):
+        raise ValidationError(f"assignment {a.title!r} has no numeric canvas_id")
+    return a.canvas_id
+
+
+def _group_ids(client: CanvasClient, ctx: ApplyContext, name: str) -> list[int]:
+    rows: list[dict[str, Any]] = client.get(
+        f"/courses/{ctx.config.course_id}/assignment_groups", _PER_PAGE
+    )
+    return [int(r["id"]) for r in rows if str(r.get("name") or "") == name]
+
+
+def _group_id(client: CanvasClient, ctx: ApplyContext, name: str) -> int:
+    """Canvas id of the assignment group called ``name`` (created earlier in this push, else
+    looked up). Duplicate names in Canvas are ambiguous, so they are refused, not guessed."""
+    made = ctx.ids.get(group_key(name))
+    if isinstance(made, int):
+        return made
+    ids = _group_ids(client, ctx, name)
+    if len(ids) == 1:
+        return ids[0]
+    if not ids:
+        raise ValidationError(f"assignment group {name!r} does not exist in Canvas")
+    raise ValidationError(f"assignment group {name!r} exists more than once in Canvas; rename one")
+
+
+def _description(a: Assignment, ctx: ApplyContext) -> str:
+    if a.body_format == "html":
+        return a.body
+    # Every assignment file sits directly in assignments/, so relative links resolve the same
+    # from any file name.
+    link_ctx = LinkContext(
+        course_id=ctx.config.course_id,
+        from_path=f"{FOLDER}/_.md",
+        ids=lambda key: ctx.ids.get(key),
+        paths=lambda kind, cid: None,
+    )
+    return md_to_html(a.body, link_ctx)
+
+
+def _fields(
+    a: Assignment, names: set[str], client: CanvasClient, ctx: ApplyContext
+) -> dict[str, Any]:
+    """Canvas body for the model fields in ``names``. A cleared value is an explicit null."""
+    out: dict[str, Any] = {}
+    if "title" in names:
+        out["name"] = a.title
+    if "points" in names:
+        out["points_possible"] = a.points
+    if "group" in names:
+        out["assignment_group_id"] = None if a.group is None else _group_id(client, ctx, a.group)
+    if "submission_types" in names:
+        out["submission_types"] = a.submission_types or ["none"]
+    if "allowed_extensions" in names:
+        out["allowed_extensions"] = a.allowed_extensions
+    if "grading_type" in names:
+        out["grading_type"] = a.grading_type
+    if "omit_from_final_grade" in names:
+        out["omit_from_final_grade"] = a.omit_from_final_grade
+    if "published" in names and a.published is not None:
+        out["published"] = a.published
+    for local, remote in (("unlock", "unlock_at"), ("due", "due_at"), ("lock", "lock_at")):
+        if local in names:
+            out[remote] = to_canvas(getattr(a, local))
+    if "body" in names or "body_format" in names:
+        out["description"] = _description(a, ctx)
+    return out
+
+
+def _require_no_override_change(before: Assignment | None, after: Assignment) -> None:
+    """HOOK (orx.9): override writes go here.
+
+    Override changes arrive on the assignment's own operation (``changes["overrides"]`` and
+    ``["assign_to_overrides_only"]``). orx.9 replaces this with a real writer that runs after
+    the assignment write, using the per-override endpoints (``POST .../overrides``,
+    ``PUT/DELETE .../overrides/<id>``). It must never put ``assignment_overrides`` in an
+    assignment body: Canvas would replace the whole set, including mastery-path overrides the
+    reader does not mirror. Until then a change is refused *before* anything is written.
+    """
+    old = before if before is not None else Assignment()
+    if any(getattr(old, f) != getattr(after, f) for f in OVERRIDE_FIELDS):
+        raise CanvasSyncError(
+            f"{after.title!r}: pushing override changes is not implemented yet; "
+            "edit overrides in Canvas and fetch"
+        )
+
+
 def create(client: CanvasClient, obj: CanvasObject, ctx: ApplyContext) -> int | str:
-    """Returns the new canvas_id."""
-    raise NotImplementedError
+    """Returns the new canvas_id. An :class:`AssignmentGroup` reuses a group of that name that
+    already exists in Canvas instead of creating a duplicate."""
+    course = ctx.config.course_id
+    if isinstance(obj, AssignmentGroup):
+        ids = _group_ids(client, ctx, obj.name)
+        if len(ids) == 1:
+            return ids[0]
+        if ids:
+            raise ValidationError(f"assignment group {obj.name!r} exists more than once in Canvas")
+        made = client.post(f"/courses/{course}/assignment_groups", json={"name": obj.name})
+        return int(made["id"])
+    a = _asg(obj)
+    _require_no_override_change(None, a)
+    names = {"title", "grading_type", "omit_from_final_grade"}
+    if a.points is not None:
+        names.add("points")
+    if a.group is not None:
+        names.add("group")
+    if a.submission_types:
+        names.add("submission_types")
+    if a.allowed_extensions:
+        names.add("allowed_extensions")
+    if a.body:
+        names.add("body")
+    names |= {n for n in ("unlock", "due", "lock") if getattr(a, n) is not None}
+    body = _fields(a, names, client, ctx)
+    body["published"] = a.published if a.published is not None else ctx.config.defaults.published
+    made = client.post(f"/courses/{course}/assignments", json={"assignment": body})
+    return int(made["id"])
 
 
 def update(
     client: CanvasClient, before: CanvasObject, after: CanvasObject, ctx: ApplyContext
 ) -> None:
-    """Only changed fields are sent."""
-    raise NotImplementedError
+    """Only changed fields are sent; override changes are refused before any write."""
+    old, new = _asg(before), _asg(after)
+    aid = _canvas_id(old)
+    changed = set(assignment_changes(old, new))
+    _require_no_override_change(old, new)
+    body = _fields(new, changed - set(OVERRIDE_FIELDS), client, ctx)
+    if body:
+        client.put(f"/courses/{ctx.config.course_id}/assignments/{aid}", json={"assignment": body})
 
 
 def delete(client: CanvasClient, obj: CanvasObject, ctx: ApplyContext) -> None:
-    """Goes through the submission guard."""
-    raise NotImplementedError
+    """Deletes an assignment only if the guard allows it. The guard re-reads Canvas and refuses
+    when any submission exists (no flag overrides that); it is consulted here as well, so that
+    no caller can reach the DELETE without it. Assignment groups are never deleted."""
+    if isinstance(obj, AssignmentGroup):
+        raise GuardBlocked("assignment groups are never deleted (delete empty groups in Canvas)")
+    a = _asg(obj)
+    aid = _canvas_id(a)
+    op = Operation(ObjectKey(Kind.ASSIGNMENT, f"{FOLDER}/{aid}"), Action.DELETE, a, None, {})
+    ctx.guard.assert_allowed(op, set())
+    client.delete(f"/courses/{ctx.config.course_id}/assignments/{aid}")
