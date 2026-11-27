@@ -101,7 +101,9 @@ def suite() -> Iterator[Harness]:
 def test_scenario_leaves_submissions_unchanged(suite: Harness, scenario: Any) -> None:
     outcome = scenario(suite)
     suite.notes["scenarios"][scenario.__name__] = outcome
-    suite.assert_submissions_unchanged()
+    # A scenario may declare the hidden state it is expected to leave (override_removal:
+    # Canvas hides the submission of a student who lost access until access_restored).
+    suite.assert_submissions_unchanged(hidden=getattr(scenario, "leaves_hidden", ()))
     # No scenario may leave the temp clone pointing at objects outside the suite.
     assert all(f.startswith("assignments/zz-canvas-sync-safety-") for f in suite.suite_files())
 
