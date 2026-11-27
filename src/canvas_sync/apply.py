@@ -30,7 +30,7 @@ from typing import Protocol, cast
 from canvas_sync.errors import GuardBlocked
 from canvas_sync.model.base import CanvasObject, Kind, ObjectKey
 from canvas_sync.plan.core import Action, Operation, Plan, unconfirmed_risks
-from canvas_sync.progress import NullProgress, Progress
+from canvas_sync.progress import Progress, safe
 from canvas_sync.remote.context import ApplyContext
 from canvas_sync.remote.http import CanvasClient
 
@@ -147,7 +147,7 @@ def apply(
                 dcheck(client, op.before, ctx)
 
     result = ApplyResult(done=[], failed=None, error=None)
-    progress = progress or NullProgress()
+    progress = safe(progress)
     progress.phase(phase, len(plan.ops))
     for i, op in enumerate(plan.ops, 1):
         what = f"[{i}/{len(plan.ops)}] {op.action.value} {op.key.path}"

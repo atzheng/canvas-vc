@@ -22,7 +22,6 @@ the course check before every ``PUT``/``DELETE /files/N``.
 
 from __future__ import annotations
 
-import contextlib
 import hashlib
 import json
 import os
@@ -42,7 +41,7 @@ from canvas_sync.model.base import CanvasObject, Kind, ObjectKey
 from canvas_sync.model.files import FileEntry, FileSettings, FilesMeta
 from canvas_sync.plan.core import Action, Operation
 from canvas_sync.plan.files import PlacedFile, canvas_settings
-from canvas_sync.progress import NullProgress, Progress
+from canvas_sync.progress import Progress, safe
 from canvas_sync.remote.context import ApplyContext, FetchContext
 from canvas_sync.remote.http import CanvasClient
 
@@ -249,7 +248,7 @@ def read_files_meta(
     ``ctx.previous`` (people edit those); ``files`` holds only ids, hashes,
     ``stable_link`` and the settings that differ from what the rules give."""
     prev_meta = ctx.previous.files_meta if ctx.previous else FilesMeta()
-    progress = progress or NullProgress()
+    progress = safe(progress)
     progress.phase("files")
     remote, ignored_ids = _list_remote(client, ctx)
     progress.phase("files", len(remote))
@@ -445,13 +444,13 @@ def _upload(client: CanvasClient, ctx: ApplyContext, entry: FileEntry) -> dict[s
         raise CanvasSyncError(f"{tree}: Canvas stored the upload as {stored!r}; check the course")
     ctx.ids[ObjectKey(Kind.FILE, tree)] = fid
     ctx.upload_done += len(data)
-    ctx.progress.bytes(ctx.upload_done, max(ctx.upload_total, ctx.upload_done))
+    safe(ctx.progress).bytes(ctx.upload_done, max(ctx.upload_total, ctx.upload_done))
     return result
 
 
 def upload_bytes(ops: Iterable[Operation], ctx: ApplyContext) -> int:
-    """Bytes the file operations in ``ops`` will upload (for progress display only; reads
-    blobs, sends nothing, never raises)."""
+    """Bytes the file operations in ``ops`` will upload (for progress display only; stats
+    the blob or working-tree file, reads no content, sends nothing, never raises)."""
     total = 0
     for op in ops:
         if op.key.kind is not Kind.FILE or op.action is Action.DELETE or op.after is None:
@@ -459,8 +458,12 @@ def upload_bytes(ops: Iterable[Operation], ctx: ApplyContext) -> int:
         new = _entry(op.after)
         if op.before is not None and _entry(op.before).sha256 == new.sha256:
             continue
-        with contextlib.suppress(Exception):
-            total += len(_content(ctx, new))
+        for path in (ctx.blobs.path_for(new.sha256), ctx.blobs.root / _tree_path(new)):
+            try:
+                total += path.stat().st_size
+                break
+            except (OSError, ValueError):
+                continue
     return total
 
 

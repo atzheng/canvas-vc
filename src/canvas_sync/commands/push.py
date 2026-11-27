@@ -49,7 +49,7 @@ from canvas_sync.model.modules import Module, ModuleItem
 from canvas_sync.model.roster import RosterCache
 from canvas_sync.plan.core import Action, Operation, Plan, unconfirmed_risks
 from canvas_sync.plan.modules import PlacedItem, module_keys
-from canvas_sync.progress import NullProgress, Progress, rich_progress
+from canvas_sync.progress import Progress, rich_progress, safe
 from canvas_sync.remote import files as files_writer
 from canvas_sync.remote import roster
 from canvas_sync.remote.backup import backup
@@ -450,7 +450,7 @@ def run_push(
     """Push HEAD to Canvas. Raises ``CanvasSyncError`` subclasses for refusals (nothing
     written); returns a result (``ok`` False) when the push stopped part way."""
     out = console or Console()
-    progress = progress or NullProgress()
+    progress = safe(progress)
     confirmed = set(confirmed or ())
     head, main = check_repo(root, allow_dirty=allow_dirty)
     check_validation(root, out)

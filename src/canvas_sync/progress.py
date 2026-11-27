@@ -47,6 +47,41 @@ class NullProgress:
         pass
 
 
+class SafeProgress:
+    """Wraps a Progress so it can never affect the work it reports on: any ``Exception``
+    from the wrapped object (e.g. OSError on a closed stderr) is swallowed and the wrapper
+    goes quiet for the rest of the run."""
+
+    def __init__(self, inner: Progress) -> None:
+        self._inner: Progress | None = inner
+
+    def _call(self, name: str, *args: object, **kw: object) -> None:
+        if self._inner is None:
+            return
+        try:
+            getattr(self._inner, name)(*args, **kw)
+        except Exception:
+            self._inner = None
+
+    def phase(self, name: str, total: int | None = None) -> None:
+        self._call("phase", name, total)
+
+    def advance(self, n: int = 1, label: str | None = None) -> None:
+        self._call("advance", n, label=label)
+
+    def bytes(self, done: int, total: int) -> None:
+        self._call("bytes", done, total)
+
+
+def safe(progress: Progress | None) -> Progress:
+    """``progress`` wrapped in ``SafeProgress`` (once); ``NullProgress`` when None."""
+    if progress is None:
+        return NullProgress()
+    if isinstance(progress, (SafeProgress, NullProgress)):
+        return progress
+    return SafeProgress(progress)
+
+
 def _human(n: int) -> str:
     size = float(n)
     for unit in ("B", "KB", "MB", "GB"):
@@ -72,15 +107,18 @@ class RichProgress:
         )
         self._task: TaskID | None = None
         self._name = ""
+        self._started = False
 
     def __enter__(self) -> RichProgress:
-        self._bar.start()
-        return self
+        return self  # the live display starts at the first phase(), so prompts stay intact
 
     def __exit__(self, *exc: object) -> None:
-        self._bar.stop()
+        self._bar.stop()  # a no-op if never started
 
     def phase(self, name: str, total: int | None = None) -> None:
+        if not self._started:
+            self._bar.start()
+            self._started = True
         if self._task is not None:
             self._bar.remove_task(self._task)
         self._name = name

@@ -120,3 +120,33 @@ def test_failure_stops_display_at_failing_op(tmp_path: Path) -> None:
     done = sum(int(str(e[1])) for e in rec.events if e[0] == "advance")
     assert done == out[2][0]
     assert "push stopped at" in out[1]
+
+
+class Exploding:
+    """A progress whose every call raises, like a closed stderr."""
+
+    def phase(self, name: str, total: int | None = None) -> None:
+        raise BrokenPipeError
+
+    def advance(self, n: int = 1, label: str | None = None) -> None:
+        raise BrokenPipeError
+
+    def bytes(self, done: int, total: int) -> None:
+        raise BrokenPipeError
+
+
+@pytest.mark.parametrize("scenario", ["ok", "fail"])
+def test_raising_progress_changes_nothing(tmp_path: Path, scenario: str) -> None:
+    a = run(*build(tmp_path, "a", scenario), NullProgress())
+    b = run(*build(tmp_path, "b", scenario), Exploding())
+    assert a[0] == b[0] and a[2] == b[2]
+
+
+def test_prompt_is_intact_before_the_bar_starts() -> None:
+    from canvas_sync.progress import RichProgress
+
+    buf = io.StringIO()
+    with RichProgress(Console(file=buf, force_terminal=True)) as p:
+        assert buf.getvalue() == ""  # entering draws nothing, so a prompt is not erased
+        p.phase("pushing", 1)
+        assert buf.getvalue() != ""  # the bar starts at the first phase

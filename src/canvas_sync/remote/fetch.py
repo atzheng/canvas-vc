@@ -16,7 +16,7 @@ from canvas_sync.model.base import CanvasObject, Kind, ObjectKey
 from canvas_sync.model.course import Course
 from canvas_sync.model.files import FilesMeta
 from canvas_sync.model.roster import Roster, RosterCache
-from canvas_sync.progress import NullProgress, Progress
+from canvas_sync.progress import Progress, safe
 from canvas_sync.remote import announcements, assignments, files, modules, pages, roster
 from canvas_sync.remote.context import FetchContext
 from canvas_sync.remote.http import CanvasClient
@@ -73,7 +73,7 @@ def fetch_course(
     ``roster-aliases.yaml`` is read and ``.canvas/roster-cache.json`` written.
     """
     base = root if root is not None else ctx.blob_store.root
-    progress = progress or NullProgress()
+    progress = safe(progress)
     progress.phase("roster")
     cache = roster.read(client, ctx, aliases=roster.load_aliases(base))
     roster.write_cache(base, cache)
