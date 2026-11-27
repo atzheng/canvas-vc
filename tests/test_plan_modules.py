@@ -624,3 +624,47 @@ def test_fetch_then_plan_is_zero_ops_with_unmanaged_and_settings(tmp_path: Path)
     after = fetch_modules(fake, tmp_path, paths)
     assert [i.item_type for i in after[0].items] == [i.item_type for i in first.items]
     assert after[1].completion_requirements == fetched[1].completion_requirements
+
+
+def test_deleting_module_with_unmanaged_item_keeps_module(
+    tmp_path: Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    fake = FakeCanvas()
+    m = add_module(fake, "W")
+    add_item(fake, m["id"], "SubHeader", title="h")
+    add_item(fake, m["id"], "ExternalTool", title="T", content_id=9)
+    base = course(fetch_modules(fake, tmp_path))
+    plan, _, _ = push(fake, base, course([]))
+    assert all(o.key.path != "modules.yaml#W" for o in plan.ops)
+    st = fake.state("modules")
+    assert m["id"] in st["modules"]
+    assert [i["type"] for i in st["items"][m["id"]]] == ["ExternalTool"]
+    err = capfd.readouterr().err
+    assert "modules.yaml: W: holds 1 item(s) canvas-sync can't manage; module not deleted" in err
+
+
+def test_unmanaged_entry_with_managed_canvas_id_keeps_item(
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    from canvas_sync.model.modules import UnmanagedItem
+
+    old = Module(canvas_id=1, name="W", items=[hdr("a", 10)])
+    new = Module(
+        canvas_id=1,
+        name="W",
+        items=[ModuleItem(unmanaged=UnmanagedItem(type="ExternalTool"), canvas_id=10)],
+    )
+    assert run_diff(course([old]), course([new])) == []
+    assert "belongs to a managed item" in capfd.readouterr().err
+
+
+def test_managed_move_across_unmanaged_does_not_warn(capfd: pytest.CaptureFixture[str]) -> None:
+    from canvas_sync.model.modules import UnmanagedItem
+
+    tool = ModuleItem(unmanaged=UnmanagedItem(type="ExternalTool"), canvas_id=12)
+    a, b, c = hdr("a", 10), hdr("b", 11), hdr("c", 13)
+    old = Module(canvas_id=1, name="W", items=[a, b, tool, c])
+    new = Module(canvas_id=1, name="W", items=[b, tool, c, a])  # a jumps over the tool
+    ops = run_diff(course([old]), course([new]))
+    assert [o.action for o in ops] == [Action.REORDER]
+    assert "unmanaged" not in capfd.readouterr().err

@@ -47,6 +47,7 @@ class PlacedModule(Module):
     with neither, first.
     """
 
+    key_path: str = ""  # this operation's key path, so a writer can record the id early
     place: bool = False
     pred_id: int | None = None
     pred_path: str | None = None
@@ -62,6 +63,7 @@ class PlacedItem(ModuleItem, CanvasObject):  # pyright: ignore[reportIncompatibl
     Placement as for ``PlacedModule``, among the module's items.
     """
 
+    key_path: str = ""
     module_path: str = ""
     module_id: int | None = None
     from_module_id: int | None = None
@@ -215,20 +217,31 @@ def diff_type(base: Course, target: Course) -> list[Operation]:
 
     # Deletes: items first (the module's own delete comes later in the list; core reverses).
     for bi, bm in enumerate(base.modules):
-        if bi not in matched_base:
-            continue  # the module itself is deleted below
+        gone = bi not in matched_base
+        left = [it for it in bm.items if it.unmanaged is not None and it.canvas_id not in claimed]
+        keep_module = gone and bool(left)
+        if gone and not keep_module:
+            continue  # the module itself is deleted below, with its items
+        if keep_module:
+            _warn(
+                f"modules.yaml: {bm.name}: holds {len(left)} item(s) canvas-sync can't manage; "
+                "module not deleted (delete it in Canvas)"
+            )
         for ii, it in enumerate(bm.items):
             if it.canvas_id is None or it.canvas_id in claimed:
                 continue
             if it.unmanaged is not None:
-                _warn(
-                    f"{bkeys[bi]}: items[{ii}]: deleting an unmanaged item is "
-                    "not supported, local deletion ignored"
-                )
+                if not keep_module:
+                    _warn(
+                        f"{bkeys[bi]}: items[{ii}]: deleting an unmanaged item is "
+                        "not supported, local deletion ignored"
+                    )
                 continue
             ops.append(_delete_item(bm, bkeys[bi], ii, it))
     for bi, bm in enumerate(base.modules):
         if bi in matched_base:
+            continue
+        if any(it.unmanaged is not None and it.canvas_id not in claimed for it in bm.items):
             continue
         touches = any(_is_assignment(i) for i in bm.items)
         ops.append(
@@ -317,6 +330,7 @@ def _module_ops(
         if bm is None:
             after = PlacedModule(
                 **_fields(tm, Module),
+                key_path=path,
                 place=later_existing,
                 pred_id=pred_id,
                 pred_path=pred_path,
@@ -351,6 +365,7 @@ def _module_ops(
             changes["position"] = (bi + 1 if bi is not None else None, ti + 1)
         after = PlacedModule(
             **_fields(tm, Module),
+            key_path=path,
             place=moved,
             pred_id=pred_id,
             pred_path=pred_path,
@@ -409,7 +424,15 @@ def _item_ops(
         cid = it.canvas_id
         hit = base_items.get(cid) if cid is not None and cid not in claimed else None
         if it.unmanaged is not None:
-            if hit is None or hit.item.unmanaged is None:
+            if hit is not None and hit.item.unmanaged is None:
+                # fail safe: never delete a managed item because of a hand-written entry
+                claimed.add(hit.item.canvas_id or 0)
+                _warn(
+                    f"{tpath}: items[{j}]: canvas_id {cid} belongs to a managed item; "
+                    "unmanaged entry ignored, item kept"
+                )
+                continue
+            if hit is None:
                 _warn(f"{tpath}: items[{j}]: adding an unmanaged item is not supported, ignored")
                 continue
             claimed.add(hit.item.canvas_id or 0)
@@ -427,24 +450,27 @@ def _item_ops(
 
     # warnings for unmanaged items, and order checks
     same = [e for e in entries if e.hit is not None and bi is not None and e.hit.mod == bi]
-    here = {e.hit.item.canvas_id for e in same if e.hit is not None and not e.unmanaged}
+    managed_same = [e for e in same if not e.unmanaged]
+    keep_idx = _lis([e.hit.idx for e in managed_same if e.hit is not None])
+    keep = {managed_same[k].j for k in keep_idx}
+
+    # Stable anchors: unmanaged items and managed items that are not being moved.
+    stable = {
+        e.hit.item.canvas_id for e in same if e.hit is not None and (e.unmanaged or e.j in keep)
+    }
     for k, e in enumerate(same):
         if not e.unmanaged or e.hit is None or bm is None:
             continue
         # An unmanaged item stays after the same managed neighbour as on Canvas.
         base_anchor = next(
-            (
-                x.canvas_id
-                for x in reversed(bm.items[: e.hit.idx])
-                if x.unmanaged is None and x.canvas_id in here
-            ),
+            (x.canvas_id for x in reversed(bm.items[: e.hit.idx]) if x.canvas_id in stable),
             None,
         )
         target_anchor = next(
             (
                 x.hit.item.canvas_id
                 for x in reversed(same[:k])
-                if not x.unmanaged and x.hit is not None
+                if x.hit is not None and x.hit.item.canvas_id in stable
             ),
             None,
         )
@@ -466,10 +492,6 @@ def _item_ops(
                 f"{tpath}: items[{e.j}]: {', '.join(edits)} of an unmanaged item "
                 "are read-only, local change ignored"
             )
-
-    managed_same = [e for e in same if not e.unmanaged]
-    keep_idx = _lis([e.hit.idx for e in managed_same if e.hit is not None])
-    keep = {managed_same[k].j for k in keep_idx}
 
     ops: list[Operation] = []
     pred_id: int | None = None
@@ -493,6 +515,7 @@ def _item_ops(
             after = _placed(
                 it,
                 canvas_id=None,
+                key_path=path,
                 module_path=tpath,
                 module_id=mid,
                 content_path=cpath,

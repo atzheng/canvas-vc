@@ -632,7 +632,7 @@ raised; the push CLI must report it as a stop, not a crash.
   and Canvas positions shift. Only items outside the longest already-ordered run are moved.
   Writers send JSON bodies (`{"module": {...}}`, `{"module_item": {...}}`) and look the
   predecessor up with a live GET of the module (or item) list. New modules are created
-  unpublished and then published by a PUT. Page/assignment item titles are never sent.
+  unpublished and then published by a PUT; the new id is put in `ctx.ids` right after the POST. Page/assignment item titles are never sent. A local module delete never removes a module that still holds `unmanaged` items on Canvas: its managed items are deleted, the module stays, with a one-line warning. A hand-written `unmanaged` entry that carries a managed item's `canvas_id` is ignored (item kept) with a warning. The pages writer must return the str slug as its id (`_content_id` relies on it).
 
 ```python
 # errors.py

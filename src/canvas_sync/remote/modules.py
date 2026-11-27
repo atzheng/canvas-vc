@@ -250,6 +250,10 @@ def _position_after(
     rows: list[dict[str, Any]] = client.get(list_path, _PER_PAGE)
     ids = [int(r["id"]) for r in sorted(rows, key=_position)]
     if pred not in ids:
+        _warn(
+            f"{getattr(placed, 'key_path', '') or 'modules.yaml'}: predecessor {pred} "
+            "not found on Canvas, appended at the end"
+        )
         return None
     at = ids.index(pred) + 1
     if moving is not None and moving in ids and ids.index(moving) < ids.index(pred):
@@ -274,6 +278,8 @@ def _create_module(client: CanvasClient, obj: Module, ctx: ApplyContext) -> int:
             body["position"] = pos
     row = client.post(_modules_path(ctx), json={"module": body})
     mid = int(row["id"])
+    if isinstance(obj, PlacedModule) and obj.key_path:  # keep the id if the publish PUT fails
+        ctx.ids[ObjectKey(Kind.MODULE, obj.key_path)] = mid
     if obj.published:  # new modules start unpublished; publishing is a separate update
         client.put(f"{_modules_path(ctx)}/{mid}", json={"module": {"published": True}})
     return mid
@@ -328,6 +334,8 @@ def _create_item(client: CanvasClient, obj: PlacedItem, ctx: ApplyContext) -> in
         body["position"] = pos
     row = client.post(_items_path(ctx, mid), json={"module_item": body})
     new_id = int(row["id"])
+    if obj.key_path:
+        ctx.ids[ObjectKey(Kind.MODULE, obj.key_path)] = new_id
     if obj.published is not None:
         client.put(
             f"{_items_path(ctx, mid)}/{new_id}",
