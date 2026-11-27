@@ -12,6 +12,8 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, cast
 
+from rich.console import Console
+
 from canvas_sync.config import CourseConfig
 from canvas_sync.errors import ValidationError
 from canvas_sync.model.roster import RosterCache
@@ -23,6 +25,11 @@ CACHE_PATH = ".canvas/roster-cache.json"  # untracked
 ALIASES_PATH = "roster-aliases.yaml"  # untracked
 
 
+def _warn(message: str) -> None:
+    """One-line warning on stderr. Never put a student identifier in ``message``."""
+    Console(stderr=True).print(f"warning: {message}", markup=False, highlight=False)
+
+
 def student_ref(
     user: Mapping[str, Any], cfg: CourseConfig, login_to_alias: Mapping[str, str]
 ) -> str | None:
@@ -32,7 +39,7 @@ def student_ref(
         sis = user.get("sis_user_id")
         return f"sis:{sis}" if sis else None
     if cfg.student_ref == "alias":
-        return login_to_alias.get(str(login)) if login else None
+        return login_to_alias.get(str(login).casefold()) if login else None
     return str(login) if login else None
 
 
@@ -54,13 +61,17 @@ def read(
     if cfg.student_ref == "alias":
         if aliases is None:
             raise ValidationError(f"{ALIASES_PATH}: required when student_ref is alias")
-        for alias, login in aliases.items():
-            if login in login_to_alias:
+        for alias, login in aliases.items():  # logins match case-insensitively
+            if login.casefold() in login_to_alias:
                 raise ValidationError(f"{ALIASES_PATH}: one login is mapped by two aliases")
-            login_to_alias[login] = alias
+            login_to_alias[login.casefold()] = alias
 
+    students = _students(client, cfg, login_to_alias)
+    if cfg.student_ref == "alias":
+        for alias in sorted(set(login_to_alias.values()) - set(students)):
+            _warn(f"{ALIASES_PATH}: alias {alias!r} matches no student in Canvas")
     return RosterCache(
-        students=_students(client, cfg, login_to_alias),
+        students=students,
         sections=_by_name(client.get(f"/courses/{cfg.course_id}/sections"), "section"),
         groups=_groups(client, ctx),
     )
@@ -89,7 +100,7 @@ def _students(
         if ref is None:
             continue
         if ref in out:
-            raise ValidationError(f"Canvas: two students share the ref {ref!r}")
+            raise ValidationError("Canvas: two students share the same student ref")
         out[ref] = int(user["id"])
     return out
 
@@ -98,13 +109,25 @@ def _groups(client: CanvasClient, ctx: FetchContext) -> dict[str, int]:
     course = ctx.config.course_id
     category = ctx.previous.roster.groups_category if ctx.previous else None
     if category is None:
-        return _by_name(client.get(f"/courses/{course}/groups"), "group")
+        return _unambiguous_groups(client.get(f"/courses/{course}/groups"))
     cats: list[dict[str, Any]] = client.get(f"/courses/{course}/group_categories")
     match = [c for c in cats if c["name"] == category]
     if not match:
+        _warn(f"roster.yaml: group category {category!r} not found in Canvas")
         return {}
     cid = int(match[0]["id"])
     return _by_name(client.get(f"/courses/{course}/group_categories/{cid}/groups"), "group")
+
+
+def _unambiguous_groups(rows: list[dict[str, Any]]) -> dict[str, int]:
+    """All groups by name; names used in several categories are left out with a warning."""
+    ids: dict[str, list[int]] = {}
+    for row in rows:
+        ids.setdefault(str(row["name"]), []).append(int(row["id"]))
+    for name, found in ids.items():
+        if len(found) > 1:
+            _warn(f"group {name!r} exists in several categories; set groups_category in roster.yaml")
+    return {name: found[0] for name, found in ids.items() if len(found) == 1}
 
 
 def load_aliases(root: Path) -> dict[str, str] | None:
