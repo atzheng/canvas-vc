@@ -41,6 +41,8 @@ def merge_canvas(root: Path, rebase: bool, console: Console) -> bool:
         console.print("already up to date", highlight=False)
         return True
     code, message = gitops.merge_with_output(root, rebase=rebase)
+    if code == 0 and rebase and head is not None:
+        gitops.restore_local_files(root, head)
     if code == 0:
         console.print(f"{'rebased onto' if rebase else 'merged'} canvas/main", highlight=False)
         return True

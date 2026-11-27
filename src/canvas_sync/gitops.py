@@ -380,6 +380,27 @@ def tree_with_carried_files(
         return _out(root, ["write-tree"], env=env)
 
 
+def restore_local_files(root: Path, before: str, ref: str = REMOTE_REF) -> bool:
+    """After ``git rebase ref`` of a branch that was at ``before``: put back the local-only
+    files (``.gitignore``, a README ...) that the rebase dropped.
+
+    A rebase flattens merge commits, and ``canvas push`` carries those files in one. A file
+    counts as local-only when ``before`` has it, HEAD lacks it, and it is not in the
+    merge base of ``before`` and ``ref`` (so a file Canvas deleted stays deleted). They are
+    added in a follow-up commit on top of HEAD. True if a commit was made; False if there
+    was nothing to restore or git refused (e.g. an untracked file in the way)."""
+    head = head_commit(root)
+    base = _run(root, ["merge-base", before, ref], ok=(0, 1)).stdout.decode().strip()
+    if head is None or not base:
+        return False
+    managed = _out(root, ["ls-tree", "-r", "--name-only", "--full-tree", base]).splitlines()
+    tree = tree_with_carried_files(root, head, before, managed)
+    if tree is None:
+        return False
+    commit = commit_tree(root, tree, [head], "canvas pull: keep local files")
+    return fast_forward(root, commit)
+
+
 def ahead_behind(root: Path, ref: str = REMOTE_REF) -> tuple[int, int]:
     """(commits in HEAD not in ``ref``, commits in ``ref`` not in HEAD); (0, 0) if either
     is missing."""
