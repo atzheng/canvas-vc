@@ -49,6 +49,7 @@ DEFAULT_PER_PAGE = 10  # Canvas default when no per_page is sent
 Handler = Callable[["Req"], Any]
 
 _ENROLLMENT_TYPES = {
+    "student_view": "StudentViewEnrollment",
     "student": "StudentEnrollment",
     "teacher": "TeacherEnrollment",
     "ta": "TaEnrollment",
