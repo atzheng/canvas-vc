@@ -40,7 +40,7 @@ from canvas_sync.commands.diff import build_plan
 from canvas_sync.commands.fetch import committed_inputs, run_fetch
 from canvas_sync.commands.push import PushResult, run_push
 from canvas_sync.config import CourseConfig, load_config
-from canvas_sync.errors import CanvasSyncError
+from canvas_sync.errors import CanvasAPIError, CanvasSyncError
 from canvas_sync.model.base import Kind
 from canvas_sync.model.roster import RosterCache
 from canvas_sync.plan.core import Plan
@@ -97,8 +97,15 @@ def assert_suite_name(name: str | None, ident: int) -> None:
         raise Refused(f"refusing: assignment {ident} is not named {PREFIX}*")
 
 
-def check_scope(plan: Plan) -> None:
-    """Every operation must be on a suite assignment file; anything else aborts the test."""
+def student_refs(student_id: int) -> set[str]:
+    """The only student refs an override may name: the test student."""
+    return {TEST_STUDENT_REF, f"unknown:{student_id}"}
+
+
+def check_scope(plan: Plan, student_id: int) -> None:
+    """Every operation must be on a suite assignment file, and every override audience (old
+    or new) must be the Student View test student alone: no section, group or other student.
+    Anything else aborts the test before a write."""
     bad = [
         f"{op.action.name} {op.key.kind.name} {op.key.path}"
         for op in plan.ops
@@ -106,14 +113,48 @@ def check_scope(plan: Plan) -> None:
     ]
     if bad:
         raise ScopeViolation("push would touch non-suite objects: " + "; ".join(bad[:5]))
+    allowed = student_refs(student_id)
+    for op in plan.ops:
+        for obj in (op.before, op.after):
+            for o in getattr(obj, "overrides", None) or []:
+                if o.section is not None or o.group is not None:
+                    raise ScopeViolation(f"{op.key.path}: override targets a section or group")
+                if not o.students or not set(o.students) <= allowed:
+                    raise ScopeViolation(
+                        f"{op.key.path}: override targets someone but the test student"
+                    )
+
+
+def check_override_payload(path: str, json: Any, students: set[int]) -> None:
+    """A write to an override may only name the test student(s) in ``students``."""
+    if "/overrides" not in path:
+        if isinstance(json, dict) and "assignment_overrides" in json.get("assignment", {}):  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+            raise ScopeViolation("refusing: assignment write carries an override set")
+        return
+    body: Any = json.get("assignment_override") if isinstance(json, dict) else None  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+    if body is None:
+        return  # DELETE, or a write with no body
+    if not isinstance(body, dict):
+        raise ScopeViolation("refusing: malformed override payload")
+    if body.get("course_section_id") or body.get("group_id"):  # pyright: ignore[reportUnknownMemberType]
+        raise ScopeViolation("refusing: override targets a section or group")
+    ids: Any = body.get("student_ids")  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+    is_create = path.endswith("/overrides")
+    if ids is None and not is_create:
+        return  # a date-only update of an existing override (audience unchanged)
+    if not isinstance(ids, list) or not ids or not {int(i) for i in ids} <= students:  # pyright: ignore[reportUnknownVariableType, reportUnknownArgumentType]
+        raise ScopeViolation("refusing: override audience is not the test student alone")
 
 
 class SuiteClient(CanvasClient):
     """A write client that only writes under assignments this run recorded."""
 
-    def __init__(self, *args: Any, recorded: set[int], **kw: Any) -> None:
+    def __init__(
+        self, *args: Any, recorded: set[int], students: set[int] | None = None, **kw: Any
+    ) -> None:
         super().__init__(*args, **kw)
         self.recorded = recorded
+        self.students: set[int] = students if students is not None else set()
         self._fence_rx = re.compile(
             rf"(?:/api/v1)?/courses/{self.course_id}/assignments/(\d+)(?:/overrides(?:/\d+)?)?"
         )
@@ -137,6 +178,7 @@ class SuiteClient(CanvasClient):
 
     def _write(self, method: str, path: str, data: Any, json: Any) -> Any:
         self._fence(method, path)
+        check_override_payload(path, json, self.students)
         return super()._write(method, path, data, json)
 
 
@@ -181,8 +223,6 @@ class RawSeeder:
         if method == "PUT" and m and path.endswith(f"/submissions/{s}"):
             assert_recorded(self.recorded, int(m.group(1)))
             return
-        if method in ("GET", "POST") and path == f"/api/v1/courses/{c}/student_view_student":
-            return
         if method == "GET" and path == "/health_check.json":
             return
         raise ScopeViolation(f"raw client refuses {method} {path}")
@@ -196,14 +236,6 @@ class RawSeeder:
         return self._http.request(
             method, self._base + path, params=params, data=data, headers=headers
         )
-
-    def find_student_view_student(self) -> int | None:
-        """The test student's id via the raw endpoint (GET, then POST which creates it)."""
-        for method in ("GET", "POST"):
-            r = self._call(method, f"/api/v1/courses/{self.course_id}/student_view_student")
-            if r.status_code == 200:
-                return int(r.json()["id"])
-        return None
 
     def submit_text(self, assignment_id: int, body: str) -> str:
         path = f"/api/v1/courses/{self.course_id}/assignments/{assignment_id}/submissions"
@@ -259,26 +291,84 @@ def load_state(path: Path) -> dict[int, str]:
     return {int(k): str(v) for k, v in raw.get("assignments", {}).items()}
 
 
-def cleanup(client: SuiteClient, created: dict[int, str], log: Callable[[str], None]) -> list[int]:
-    """Delete recorded suite assignments (prefix verified live). Returns the ids deleted.
+def check_no_stale_state(path: Path) -> None:
+    """A state file left by a crashed run means orphaned suite assignments: clean up first."""
+    if path.exists():
+        raise Refused(
+            f"refusing: {path} exists (an earlier run did not finish); "
+            "run `python -m tests.integration.sandbox cleanup` first"
+        )
+
+
+@dataclass
+class CleanupResult:
+    deleted: list[int] = field(default_factory=list[int])
+    gone: list[int] = field(default_factory=list[int])  # confirmed 404 / already deleted
+    failed: dict[int, str] = field(default_factory=dict[int, str])  # still need cleaning
+
+    @property
+    def unresolved(self) -> dict[int, str]:
+        return self.failed
+
+
+def cleanup(
+    client: SuiteClient, created: dict[int, str], log: Callable[[str], None]
+) -> CleanupResult:
+    """Delete recorded suite assignments (prefix verified live).
+
+    Only a 404 (or a ``deleted`` workflow state) counts as already gone; any other error
+    leaves the id in ``failed`` so its state-file entry is kept. A misnamed or unrecorded id
+    raises ``Refused`` (nothing further is deleted).
 
     Their test-student submissions go with them: that is the suite's own data. This is the one
     place in the repo that deletes an assignment with a submission, by design and for suite
     objects only.
     """
-    deleted: list[int] = []
+    res = CleanupResult()
     for aid in sorted(created):
         assert_recorded(client.recorded, aid)
+        base = f"/courses/{client.course_id}/assignments/{aid}"
         try:
-            live = client.get_one(f"/courses/{client.course_id}/assignments/{aid}")
+            live = client.get_one(base)
+        except CanvasAPIError as e:
+            if e.status == 404:
+                res.gone.append(aid)
+                log(f"assignment {aid}: already gone (404)")
+            else:
+                res.failed[aid] = f"read failed: HTTP {e.status}"
+                log(f"NOT CLEANED assignment {aid}: read failed with HTTP {e.status}")
+            continue
         except CanvasSyncError as e:
-            log(f"assignment {aid}: {type(e).__name__} (already gone?)")
+            res.failed[aid] = f"read failed: {type(e).__name__}"
+            log(f"NOT CLEANED assignment {aid}: read failed ({type(e).__name__})")
             continue
         assert_suite_name(live.get("name"), aid)
-        client.delete(f"/courses/{client.course_id}/assignments/{aid}")
-        deleted.append(aid)
+        if live.get("workflow_state") == "deleted":
+            res.gone.append(aid)
+            continue
+        try:
+            client.delete(base)
+        except CanvasSyncError as e:
+            res.failed[aid] = f"delete failed: {type(e).__name__}"
+            log(f"NOT CLEANED assignment {aid}: delete failed ({type(e).__name__})")
+            continue
+        res.deleted.append(aid)
         log(f"deleted assignment {aid}")
-    return deleted
+    return res
+
+
+def settle_state(state: Path, created: dict[int, str], res: CleanupResult) -> None:
+    """Keep only unresolved ids in the state file; remove it when all are resolved. Raises
+    ``Refused`` (loudly) if anything is left."""
+    if not res.failed:
+        state.unlink(missing_ok=True)
+        return
+    save_state(state, {i: created[i] for i in res.failed})
+    ids = ", ".join(str(i) for i in sorted(res.failed))
+    raise Refused(
+        f"CLEANUP INCOMPLETE: assignments {ids} remain in the sandbox course; "
+        f"state kept in {state}; run `python -m tests.integration.sandbox cleanup`"
+    )
 
 
 # ---- the harness --------------------------------------------------------------------------
@@ -303,7 +393,7 @@ def normalize_submission(row: dict[str, Any]) -> dict[str, Any]:
 class Harness:
     """One temp clone of the sandbox course scoped to the suite's own assignments."""
 
-    make_client: Callable[[Literal["read", "write"], set[int]], CanvasClient]
+    make_client: Callable[[Literal["read", "write"], set[int], set[int]], CanvasClient]
     seeder_factory: Callable[[int, set[int]], Seeder]
     url: str
     course_id: int
@@ -312,6 +402,7 @@ class Harness:
     log: Callable[[str], None] = print
     check_course: Callable[[CanvasClient], None] = lambda _c: None
     recorded: set[int] = field(default_factory=set[int])
+    students: set[int] = field(default_factory=set[int])  # the test student, once found
     created: dict[int, str] = field(default_factory=dict[int, str])
     ids: dict[str, int] = field(default_factory=dict[str, int])
     student_id: int = 0
@@ -322,8 +413,8 @@ class Harness:
 
     def __post_init__(self) -> None:
         self.root = self.workdir / "course"
-        self.read = self.make_client("read", self.recorded)
-        self.write = self.make_client("write", self.recorded)
+        self.read = self.make_client("read", self.recorded, self.students)
+        self.write = self.make_client("write", self.recorded, self.students)
 
     # -- Canvas helpers --------------------------------------------------------------------
 
@@ -353,9 +444,17 @@ class Harness:
             return None
 
     def find_test_student(self) -> int:
+        """The Student View student; its enrollment must be StudentViewEnrollment."""
         rows = self.read.get(
-            f"/courses/{self.course_id}/users", {"enrollment_type[]": ["student_view"]}
+            f"/courses/{self.course_id}/users",
+            {"enrollment_type[]": ["student_view"], "include[]": ["enrollments", "test_student"]},
         )
+        rows = [
+            r
+            for r in rows
+            if r.get("is_test_student")
+            or any(e.get("type") == "StudentViewEnrollment" for e in r.get("enrollments") or [])
+        ]
         if len(rows) == 1:
             return int(rows[0]["id"])
         if len(rows) > 1:
@@ -391,6 +490,7 @@ class Harness:
         """Create the four suite assignments, seed test-student work, record baselines."""
         self.check_course(self.read)
         self.student_id = self.find_test_student()
+        self.students.add(self.student_id)
         due = "2027-12-31T07:59:00Z"
         self.create_assignment("ungraded", due_at=due)
         self.create_assignment("graded", due_at=due)
@@ -491,6 +591,13 @@ class Harness:
         (root / ".gitignore").write_text(f"{roster.CACHE_PATH}\n{roster.ALIASES_PATH}\n")
         self.commit("suite: .gitignore")
         self.config = load_config(root)
+        self.minimal_roster()
+
+    def minimal_roster(self) -> None:
+        """Replace the fetched roster cache (it lists real students) with the test student
+        alone, under the `unknown:<id>` ref that fetch writes for it. Never printed."""
+        cache = RosterCache(students={f"unknown:{self.student_id}": self.student_id})
+        roster.write_cache(self.root, cache)
 
     def _git(self, *args: str) -> str:
         cfg = [
@@ -537,7 +644,8 @@ class Harness:
 
     def push(self, **kw: Any) -> PushResult:
         """check_scope first (offline), then the real ``run_push``. Commit before calling."""
-        check_scope(self.plan())
+        check_scope(self.plan(), self.student_id)
+        self.minimal_roster()
         kw.setdefault("yes", True)
         buf = io.StringIO()
         con = Console(file=buf, width=200, force_terminal=False)
@@ -567,12 +675,13 @@ class Harness:
             now = self.snapshot(aid)
             assert now == before, f"submission on assignment {aid} changed: {before} -> {now}"
 
-    def finish(self, state_file: Path | None = None) -> list[int]:
+    def finish(self, state_file: Path | None = None) -> CleanupResult:
+        """Delete the suite's assignments; keep the state file for any that could not be."""
         assert isinstance(self.write, SuiteClient)
-        deleted = cleanup(self.write, self.created, self.log)
-        if state_file is not None and state_file.exists():
-            state_file.unlink()
-        return deleted
+        res = cleanup(self.write, self.created, self.log)
+        if state_file is not None:
+            settle_state(state_file, self.created, res)
+        return res
 
 
 def new_workdir() -> Path:
@@ -607,10 +716,14 @@ def main(argv: list[str]) -> int:
     recorded = set(created)
     c = SuiteClient(url, env["CANVAS_TOKEN"], course_id=course, mode="write", recorded=recorded)
     try:
-        cleanup(c, created, print)
+        res = cleanup(c, created, print)
     finally:
         c.close()
-    path.unlink()
+    try:
+        settle_state(path, created, res)
+    except Refused as e:
+        print(e)
+        return 1
     return 0
 
 

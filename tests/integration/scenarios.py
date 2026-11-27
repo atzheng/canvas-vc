@@ -14,7 +14,6 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from canvas_sync.errors import GuardBlocked
-from canvas_sync.remote import roster
 from tests.integration.sandbox import ALL_FLAGS, Harness, Refused
 
 GRADING = {"--confirm-grading-change"}
@@ -156,21 +155,18 @@ def body_and_title_edit(h: Harness) -> str:
     return "body edits on submitted assignments pushed"
 
 
-def _section_name(h: Harness) -> str:
-    names = sorted(roster.load_cache(h.root).sections)
-    if not names:
-        raise Refused("the course has no sections to use as an override audience")
-    return names[0]
+def _student_ref(h: Harness) -> str:
+    return f"unknown:{h.student_id}"
 
 
-def _access_on(h: Harness, section: str) -> None:
-    """'access' becomes overrides-only, with a single section override (the section is only
-    an audience on this suite assignment). The test student is not a StudentEnrollment, so the
-    guard sees a submitter that loses 'Everyone else'."""
+def _access_on(h: Harness) -> None:
+    """'access' becomes overrides-only with one student override naming the Student View test
+    student alone (never a section, group or real student; ``check_scope`` enforces it)."""
     h.edit(
         "access",
         "published: true\n",
-        f"published: true\nassign_to_overrides_only: true\noverrides:\n  - section: {section!r}\n",
+        "published: true\nassign_to_overrides_only: true\n"
+        f"overrides:\n  - students: [{_student_ref(h)}]\n    due: 2027-12-30 23:59\n",
     )
 
 
@@ -185,49 +181,60 @@ def _access_off(h: Harness) -> None:
         if line.startswith("overrides:"):
             skipping = True
             continue
-        if skipping and (line.startswith((" ", "- "))):
+        if skipping and line.startswith((" ", "- ")):
             continue
         skipping = False
         out.append(line)
     p.write_text("\n".join(out), encoding="utf-8")
 
 
-def access_removal(h: Harness) -> str:
-    """Turning on 'overrides only' removes 'Everyone else': a submitter loses access.
-    Refused without --confirm-access-removal; with it the push may proceed, and the
-    submission is still intact (the autouse comparison in ``h.scenario()``)."""
-    section = _section_name(h)
+def _drop_override_keep_overrides_only(h: Harness) -> None:
+    _access_off(h)
+    h.edit("access", "published: true\n", "published: true\nassign_to_overrides_only: true\n")
+
+
+def override_added_for_test_student(h: Harness) -> str:
+    """Overrides-only plus an override for the test student alone: the submitter keeps access,
+    the plan still asks for --confirm-access-removal because "Everyone else" goes away."""
     with h.scenario():
-        _access_on(h, section)
-        _commit_edit(h, "overrides only")
-        a = _expect_blocked(h, "access removal unconfirmed")
+        _access_on(h)
+        _commit_edit(h, "overrides only + test student override")
+        result = h.push(confirmed=set(ACCESS))  # the plan flags "Everyone else" going away
+        assert result.ok, h.last_output
         live = h.assignment("access") or {}
-        assert not live.get("only_visible_to_overrides")
-    with h.scenario():
-        _access_on(h, section)
-        _commit_edit(h, "overrides only")
-        result = h.push(confirmed=set(ACCESS) | GRADING)
-        b = "confirmed push applied" if result.ok else f"push stopped: {h.last_output[-100:]}"
-    return f"{a}; {b}"
+        assert live.get("only_visible_to_overrides"), "override was not applied"
+    return "override for the test student pushed; submission kept"
 
 
 def override_removal(h: Harness) -> str:
-    """Remove the override (and then the overrides-only flag): submissions stay. Whether a
-    flag is needed is recorded, not prescribed."""
-    live = h.assignment("access") or {}
-    if not live.get("only_visible_to_overrides"):
-        return "skipped: access_removal did not apply the override"
+    """Remove the only override while overrides-only stays on: the submitter loses access.
+    Refused without --confirm-access-removal; with it the push may proceed; the submission is
+    intact either way (compared by ``h.scenario()``)."""
+    if not (h.assignment("access") or {}).get("only_visible_to_overrides"):
+        raise Refused("override_added_for_test_student did not apply the override")
+    with h.scenario():
+        _drop_override_keep_overrides_only(h)
+        _commit_edit(h, "remove override")
+        a = _expect_blocked(h, "override removal unconfirmed")
+    with h.scenario():
+        _drop_override_keep_overrides_only(h)
+        _commit_edit(h, "remove override")
+        result = h.push(confirmed=set(ACCESS))
+        b = "confirmed removal pushed" if result.ok else f"push stopped: {h.last_output[-100:]}"
+    return f"{a}; {b}"
+
+
+def access_restored(h: Harness) -> str:
+    """Put 'access' back to a plain assignment (overrides-only off, no override)."""
     with h.scenario():
         _access_off(h)
-        _commit_edit(h, "remove override")
+        _commit_edit(h, "restore access")
         try:
             ok = h.push().ok
-            how = "no flag needed"
         except GuardBlocked:
             ok = h.push(confirmed=set(ALL_FLAGS)).ok
-            how = "needed a confirm flag"
         assert ok, h.last_output
-    return f"override removal pushed ({how})"
+    return "access restored"
 
 
 def delete_only_the_empty_assignment(h: Harness) -> str:
@@ -256,7 +263,8 @@ SCENARIOS: list[Callable[[Harness], str]] = [
     unpublish_with_submission,
     submission_types_change,
     body_and_title_edit,
-    access_removal,
+    override_added_for_test_student,
     override_removal,
+    access_restored,
     delete_only_the_empty_assignment,
 ]

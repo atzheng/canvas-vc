@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from collections.abc import Iterator
 from typing import Any, Literal
 
@@ -30,6 +31,7 @@ from tests.integration.sandbox import (
     SuiteClient,
     check_course_unpublished,
     check_env,
+    check_no_stale_state,
     new_workdir,
     save_state,
     state_path,
@@ -44,15 +46,20 @@ def suite() -> Iterator[Harness]:
     env = dict(os.environ)
     try:
         url, course = check_env(env)
+        state = state_path(env)
+        check_no_stale_state(state)
     except Refused as e:
         pytest.skip(str(e))
-    token = env["CANVAS_TOKEN"]
-    state = state_path(env)
 
-    def make(mode: Literal["read", "write"], recorded: set[int]) -> CanvasClient:
-        return SuiteClient(url, token, course_id=course, mode=mode, recorded=recorded)
+    # The token is read where it is used and kept in no local, so --showlocals cannot show it.
+    def make(
+        mode: Literal["read", "write"], recorded: set[int], students: set[int]
+    ) -> CanvasClient:
+        return SuiteClient(
+            url, os.environ["CANVAS_TOKEN"], course_id=course, mode=mode, recorded=recorded,
+            students=students,
+        )  # fmt: skip
 
-    h: Harness | None = None
     created: dict[int, str] = {}
 
     def on_record(aid: int, name: str) -> None:
@@ -61,7 +68,9 @@ def suite() -> Iterator[Harness]:
 
     h = Harness(
         make_client=make,
-        seeder_factory=lambda sid, rec: RawSeeder(url, token, course, sid, rec),
+        seeder_factory=lambda sid, rec: RawSeeder(
+            url, os.environ["CANVAS_TOKEN"], course, sid, rec
+        ),
         url=url,
         course_id=course,
         workdir=new_workdir(),
@@ -74,15 +83,18 @@ def suite() -> Iterator[Harness]:
         h.notes["scenarios"] = {}
         yield h
     finally:
-        report = h.workdir / "report.json"
-        report.write_text(json.dumps(h.notes, indent=2, default=str))
-        print(f"\nsafety suite report: {report}")
-        print(json.dumps(h.notes, indent=2, default=str))
         try:
+            # The report holds counts and outcomes only. It is written outside the clone.
+            report = state.parent / "safety-suite-report.json"
+            report.write_text(json.dumps(h.notes, indent=2, default=str))
+            print(f"\nsafety suite report: {report}")
+            print(json.dumps(h.notes, indent=2, default=str))
             h.finish(state)
         finally:
             h.read.close()
             h.write.close()
+            # The clone's roster cache can hold real students' refs: never leave it behind.
+            shutil.rmtree(h.workdir, ignore_errors=True)
 
 
 @pytest.mark.parametrize("scenario", SCENARIOS, ids=lambda f: f.__name__)
