@@ -44,6 +44,11 @@ src/canvas_sync/
   gitops.py                    git plumbing                               (§11)
   snapshot.py                  Course -> commit on canvas/main            (§11)
   ignore.py                    .canvasignore matching                     (§11)
+  ui/                          read-only explorer, `canvas ui`            (§13, UI.md)
+    server.py layout.py state.py index.py
+    views/overview.py modules.py objects.py timeline.py files.py changes.py
+    static/ui.css
+  commands/ui.py               `canvas ui [--port N] [--no-open]`         (§13)
 tests/
   fake_canvas/                 FakeCanvas (§12): used by every test touching remote/
     __init__.py core.py        transport, routing, pagination, request log, course/sections/users/groups
@@ -53,7 +58,8 @@ tests/
   integration/                 opt-in, real sandbox course (§12)
 ```
 
-The scaffold bead creates every module above as a stub, with the signatures
+The scaffold bead creates every module above (except `ui/` and `commands/ui.py`, which the
+mbz beads create when they fill them in, §13) as a stub, with the signatures
 from this file raising `NotImplementedError`. Later beads fill in a file
 instead of creating shared ones.
 
@@ -888,3 +894,179 @@ difference check runs before canvas/main is moved. There's no separate write-bac
   `CANVAS_SANDBOX_COURSE`, `CANVAS_TOKEN` set (pytest marker `integration`,
   skipped by default). The safety suite seeds a test student's submissions
   through the sandbox's Student View.
+
+## 13. Explorer UI (`canvas ui`)
+
+What each view is for, with wireframes: UI.md. This section fixes the stack,
+routes, module layout and the read-only guarantees.
+
+**Stack.** `http.server` (stdlib `ThreadingHTTPServer`) plus server-rendered
+HTML built from Python functions and f-strings, one static CSS file, no
+JavaScript, no build step, **no new runtime dependency** (no jinja2: the pages
+are small tables and lists, and `html.escape` through one helper is enough).
+Markdown bodies render with `markdown-it-py`, already a dependency.
+
+**Read-only rules** (hold for all of `src/canvas_sync/ui/` and
+`commands/ui.py`; tested):
+- Never builds a `CanvasClient`, never reads a token, never touches the
+  network. Binds `127.0.0.1` only (not configurable); no CORS headers.
+- Never writes to the working tree, to refs, or to `.canvas/`. Only `GET`
+  and `HEAD` are served; any other method is `405`.
+- Reads the tree through `model.course.load_tree` and `gitops`
+  (`load_course_at`, `ahead_behind`, `read_tree_files`, `head_commit`,
+  `ref_commit`, `operation_in_progress`, `conflict_marker_paths`,
+  `changed_paths`, `last_fetch_time`) only. No `gitops` function that changes
+  refs, the index or the work tree (`update_ref`, `write_tree`,
+  `commit_tree`, `merge`, `fast_forward`, `merge_with_output`,
+  `record_fetch_time`, ...).
+- Never shows `.canvas/roster-cache.json` content (real student names).
+  Overrides are shown by alias/section/group as written in the tree. Calling
+  `validate_tree` is allowed (it reads the cache to check names) but the UI
+  shows only `Issue.path` and `Issue.message`; a test asserts that a seeded
+  cache name never appears in any page.
+- Every request reloads from disk: no caching, no file watching.
+- A path from a URL is never joined to the file system directly. It is looked
+  up as a key of the loaded course (`Course.objects`, which includes the
+  `files/` entries); anything else is `404`. Served file bytes come only from
+  regular, non-symlink files under the working tree's `files/`.
+- All text from the tree goes through `layout.esc`; bodies of
+  `body_format: html` objects are shown as escaped source.
+- Enforced by `tests/test_ui_readonly.py`: an AST scan of `ui/**` and
+  `commands/ui.py` fails on importing `canvas_sync.remote.http`, `httpx`,
+  `requests`, `canvas_sync.apply` or `canvas_sync.snapshot`, or on using a
+  `gitops` name outside the read allowlist above (the allowlist is a constant
+  in the test; widening it is called out in the PR body).
+
+**Command** (`commands/ui.py`, registered in `cli.py`):
+`canvas ui [--port N] [--no-open]`. Default port 8765; `--port 0` picks a
+free one. Run from inside the repo (uses `gitops.repo_root`). Prints
+`Serving <root> at http://127.0.0.1:<port>/ (Ctrl-C to stop)` through `rich`
+and opens the browser unless `--no-open`.
+
+**Routes** (all `GET`; unknown route or bad path `404`; internal error `500`
+page with a one-line message, never a traceback):
+
+| route | view (module) | bead |
+|---|---|---|
+| `/` | overview (`views/overview.py`) | mbz.2 |
+| `/modules` | modules outline (`views/modules.py`) | mbz.4 |
+| `/objects`, `/objects/<kind>` | object lists; kind is `pages`, `assignments`, `announcements`, `files` or `modules` (`views/objects.py`) | mbz.5 |
+| `/o/<tree path>` | object detail, e.g. `/o/pages/syllabus.md`, `/o/modules.yaml%23Week%201` (`views/objects.py`) | mbz.5 |
+| `/timeline` (`?kind=`) | dated events by week (`views/timeline.py`) | mbz.6 |
+| `/files` | files tree (`views/files.py`) | mbz.7 |
+| `/files/raw/<path under files/>` | file bytes (`views/files.py`) | mbz.7 |
+| `/changes` | pending plan and history (`views/changes.py`) | mbz.8 |
+| `/static/ui.css` | stylesheet, the only static file | mbz.2 |
+
+**Shared page layout** (`ui/layout.py`, created by mbz.2, used by all views):
+
+```python
+def esc(s: object) -> str                       # html.escape(str(s), quote=True)
+def link(href: str, text: str) -> str           # text escaped, href url-quoted and escaped
+def obj_href(path: str) -> str                  # "/o/" + quoted tree path (module keys: "modules.yaml#name")
+def badge(text: str, kind: str = "") -> str     # <span class="badge kind">
+def table(headers: Sequence[str], rows: Iterable[Sequence[str]]) -> str   # cells are already HTML
+@dataclass(frozen=True)
+class Response:
+    status: int
+    body: bytes
+    content_type: str = "text/html; charset=utf-8"
+    headers: tuple[tuple[str, str], ...] = ()
+def page(title: str, body: str, *, current: str, config: CourseConfig | None) -> Response
+    # full document: nav bar (Overview Modules Objects Timeline Files Changes),
+    # `current` highlighted, course title from config, link to /static/ui.css
+def not_found(msg: str = "not found") -> Response
+def error_page(msg: str, status: int = 500) -> Response
+```
+
+Arguments to `table` and `page` are HTML the caller already escaped with
+`esc`; the helpers never escape twice and never take raw tree text.
+
+**View inputs.** A view is a pure function of its inputs; all I/O goes
+through `State`:
+
+```python
+# ui/state.py (created by mbz.2)
+@dataclass(frozen=True)
+class State:                         # built fresh per request by State.load(root)
+    root: Path
+    course: Course | None            # None if load_tree failed
+    load_error: str | None           # one-line message when course is None
+    head: str | None                 # gitops.head_commit
+    remote: str | None               # gitops.ref_commit (canvas/main); None = never fetched
+    @classmethod
+    def load(cls, root: Path) -> "State"
+    def remote_course(self) -> Course | None     # load_course_at(canvas/main); None when never fetched
+    def index(self) -> Index                      # ui.index.build_index(course), computed on demand
+
+# every view module:
+def render(state: State, path: str, query: Mapping[str, list[str]]) -> Response
+    # `path` is what follows the route prefix ("" for /modules, "pages/x.md" for /o/pages/x.md)
+```
+
+`server.py` owns: URL parsing (percent-decode once; reject NUL and `..`
+components before any lookup), the route dict `{prefix: render}`, building
+`State`, turning exceptions into `error_page`, and the server loop. Views
+never see the socket. `server.make_server(root, port) -> ThreadingHTTPServer`
+returns the bound server (so tests read `server_address`).
+
+**Reference index** (`ui/index.py`, mbz.3; pure: no I/O, no git):
+
+```python
+@dataclass(frozen=True)
+class Link:
+    source: str          # tree path of the referrer ("modules.yaml#<name>" for a module item)
+    target: str          # resolved tree path, or the raw relative href when broken
+    kind: Literal["link", "image", "module_item"]
+    line: int | None     # 1-based line in the body when known
+    broken: bool         # no such object or file in the tree
+
+@dataclass(frozen=True)
+class Index:
+    outbound: dict[str, tuple[Link, ...]]    # source tree path -> its links, document order
+    backlinks: dict[str, tuple[Link, ...]]   # target tree path -> links to it (modules included)
+    broken: tuple[Link, ...]
+    orphans: tuple[str, ...]                 # non-file objects with no backlinks, in no module
+    unreferenced_files: tuple[str, ...]      # files/** with no backlinks, in no module
+
+def build_index(course: Course) -> Index
+```
+
+Links come from `markdown-it-py` tokens (`link_open`, `image`, and
+`href`/`src` in `html_inline`/`html_block`), skipping `http(s)`, `mailto` and
+pure `#fragment` hrefs, and are resolved against the object's own path with
+the same rule `render.links.to_canvas_url` uses (`?query`/`#fragment`
+stripped). `body_format: html` bodies are scanned for `href`/`src` the same
+way. Module items yield `module_item` links from `modules.yaml#<name>` to the
+page, assignment or file they name. Output is sorted by path, so the index is
+deterministic.
+
+**Tests** (`tests/test_ui_*.py`; none touches the network):
+- Pure view and index functions run on a `Course` built in memory or from
+  `tests/fixtures/`; assert with substring checks on the HTML, escaping
+  included (a title `<script>` must appear as `&lt;script&gt;`).
+- `tests/helpers/ui_repo.py: make_repo(tmp_path, files, *, remote_files=None)`
+  creates a real git repo with one commit of `files` and, when `remote_files`
+  is given, a `canvas/main` ref built with `gitops.write_tree` /
+  `commit_tree` / `update_ref` (a "fetched" repo that differs from HEAD).
+  Fixture people are invented.
+- HTTP tests start the real server on port 0 in a thread, call it with
+  `urllib.request`, and stop it in a fixture finalizer. They cover: 200 per
+  route, 404 for an unknown route and for traversal (`/o/../x`,
+  `/files/raw/..%2f..%2fetc/passwd`, a symlink in `files/`), 405 for POST,
+  the never-fetched state, and that `git status`, all refs and `.canvas/`
+  are unchanged after the requests.
+- `tests/test_ui_readonly.py`: the AST scan above, plus the roster-cache
+  sentinel-name check.
+
+**Scaffold.** No stub modules for `ui/`: the package does not exist until
+mbz.2 creates `server.py`, `layout.py`, `state.py`, `commands/ui.py` and
+`static/ui.css`. mbz.3 to mbz.8 each add only their own file (`index.py` or
+`views/<view>.py`) and one line in `server.py`'s route dict. The CSS is
+package data read through `importlib.resources` (hatch includes files inside
+the package); a server test fetches it.
+
+**Date checks (mbz.6).** The timeline flags must agree with `validate`.
+mbz.6 moves the logic of `commands/validate._check_dates` into a pure
+function `validate.date_issues(where, obj) -> list[Issue]` in the same PR,
+and `validate_tree` calls it.
