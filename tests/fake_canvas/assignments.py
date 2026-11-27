@@ -272,6 +272,8 @@ def register(fake: FakeCanvas) -> None:
             raise FakeCanvasError("the tool must never touch a mastery-path override")
         clash(o["assignment_id"], body, o["id"])
         o.update(body)
+        if "student_ids" in o and not o.get("title"):  # a cleared title: Canvas regenerates it
+            o["title"] = f"{len(o['student_ids'])} students"
         return dict(o)
 
     def delete_override(q: Req) -> dict[str, Any]:

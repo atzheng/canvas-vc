@@ -126,7 +126,7 @@ def test_diff_overrides_is_minimal_and_keyed_by_target() -> None:
     grp = Override(group="Team 1")
     assert diff_overrides([sec, grp], [grp, sec]) == []  # order is not significant
     moved = Override(section="BA2")
-    assert kinds(diff_overrides([sec, grp], [moved, grp])) == ["remove", "add"]
+    assert kinds(diff_overrides([sec, grp], [moved, grp])) == ["add", "remove"]
     dated = Override(group="Team 1", due=None, title="ignored")
     assert diff_overrides([grp], [dated]) == []  # a group/section override has no custom title
 
@@ -136,14 +136,29 @@ def test_diff_overrides_student_sets_match_by_title_when_membership_changes() ->
     grown = Override(students=["ann", "bob", "cy"], title="Accommodations")
     (c,) = diff_overrides([old], [grown])
     assert (c.kind, c.before, c.after) == ("update", old, grown)
+    # No title: paired by overlap into one update, so "ann" is never without an override.
     untitled = diff_overrides([Override(students=["ann"])], [Override(students=["ann", "bob"])])
-    assert kinds(untitled) == ["remove", "add"]
+    assert kinds(untitled) == ["update"]
+    # No student in common: add first, then remove.
+    apart = diff_overrides([Override(students=["ann"])], [Override(students=["cy"])])
+    assert kinds(apart) == ["add", "remove"]
 
 
-def test_diff_overrides_orders_removes_updates_adds() -> None:
+def test_diff_overrides_pairs_by_largest_overlap_deterministically() -> None:
+    old = [Override(students=["ann", "bob", "cy"]), Override(students=["dee"])]
+    new = [Override(students=["ann", "bob"]), Override(students=["dee", "cy"])]
+    out = diff_overrides(old, new)
+    assert [(c.before.students, c.after.students) for c in out if c.before and c.after] == [
+        (["ann", "bob", "cy"], ["ann", "bob"]),  # shrinking set first
+        (["dee"], ["cy", "dee"]),
+    ]
+    assert diff_overrides(list(reversed(old)), list(reversed(new))) == out
+
+
+def test_diff_overrides_orders_shrinking_updates_adds_updates_removes() -> None:
     a, b, c = Override(section="BA1"), Override(section="BA2"), Override(group="Team 1")
     later = Override(section="BA1", due=asg(due="2026-10-01 12:00").due)
-    assert kinds(diff_overrides([a, b], [later, c])) == ["remove", "update", "add"]
+    assert kinds(diff_overrides([a, b], [later, c])) == ["add", "update", "remove"]
 
 
 def test_static_access_risk_only_when_an_audience_drops_out() -> None:
@@ -219,16 +234,88 @@ def test_adding_a_student_rewrites_the_whole_student_list(env: Env) -> None:
     assert sent["title"] == "Accommodations"
 
 
-def test_untitled_student_set_change_is_delete_plus_create(env: Env) -> None:
+def test_untitled_student_set_growth_is_one_put(env: Env) -> None:
     a = base_assignment(env)
-    add_override(env.fake, a["id"], student_ids=[env.users["ann"]], title="1 student")
+    ov = add_override(env.fake, a["id"], student_ids=[env.users["ann"]], title="1 student")
     base = env.fetch()
     grown = Override(students=["ann", "bob"])
     _, result = env.push(base, edit(base, only_path(base), overrides=[grown]))
     assert result.error is None
-    assert [w.method for w in env.writes()] == ["DELETE", "POST"]
-    (ov,) = env.overrides(a["id"])
-    assert sorted(ov["student_ids"]) == sorted([env.users["ann"], env.users["bob"]])
+    (put,) = env.writes()
+    assert put.method == "PUT" and put.path.endswith(f"/overrides/{ov['id']}")
+    assert "title" in put.body["assignment_override"]  # cleared explicitly, not an auto-title
+    assert put.body["assignment_override"]["title"] is None
+    (row,) = env.overrides(a["id"])
+    assert sorted(row["student_ids"]) == sorted([env.users["ann"], env.users["bob"]])
+
+
+def test_disjoint_student_sets_add_before_remove_and_failed_post_keeps_coverage(env: Env) -> None:
+    a = base_assignment(env)
+    add_override(env.fake, a["id"], student_ids=[env.users["ann"]], title="1 student")
+    other = add_override(env.fake, a["id"], course_section_id=env.ba2)
+    base = env.fetch()
+    path = only_path(base)
+    target = edit(base, path, overrides=[Override(section="BA2"), Override(students=["cy"])])
+    del other
+    _, result = env.push(base, target, {CONFIRM_ACCESS})
+    assert result.error is None
+    assert [w.method for w in env.writes()] == ["POST", "DELETE"]
+
+    # A failing POST leaves the old override (and its student) untouched.
+    env2 = Env(env.tmp / "again")
+    b = base_assignment(env2)
+    old = add_override(env2.fake, b["id"], student_ids=[env2.users["ann"]], title="1 student")
+    base2 = env2.fetch()
+    env2.fake.fail(method="POST", path=r".*/overrides", status=500)
+    target2 = edit(base2, only_path(base2), overrides=[Override(students=["cy"])])
+    _, failed = env2.push(base2, target2, {CONFIRM_ACCESS})
+    assert failed.error is not None
+    assert [o["id"] for o in env2.overrides(b["id"])] == [old["id"]]
+
+
+def test_moving_a_student_between_sets_never_double_covers(env: Env) -> None:
+    a = base_assignment(env)
+    add_override(env.fake, a["id"], student_ids=[env.users["ann"], env.users["bob"]], title="A")
+    add_override(env.fake, a["id"], student_ids=[env.users["cy"]], title="B")
+    base = env.fetch()
+    by_title = {o.title: o for o in current(base).overrides}
+    moved = [
+        by_title["A"].model_copy(update={"students": ["ann"]}),
+        by_title["B"].model_copy(update={"students": ["bob", "cy"]}),
+    ]
+    _, result = env.push(base, edit(base, only_path(base), overrides=moved))
+    assert result.error is None, result.error  # the fake rejects a student in two overrides
+    assert [w.method for w in env.writes()] == ["PUT", "PUT"]
+
+
+def test_ambiguous_live_overrides_are_refused_before_any_write(env: Env) -> None:
+    a = base_assignment(env)
+    add_override(env.fake, a["id"], course_section_id=env.ba1)
+    base = env.fetch()
+    add_override(env.fake, a["id"], course_section_id=env.ba1)  # a second one for the same section
+    new = current(base).overrides[0].model_copy(update={"due": current(base).due})
+    with pytest.raises(ValidationError, match=r"more than one Canvas override targets the same"):
+        env.push(base, edit(base, only_path(base), overrides=[new]))
+    assert env.writes() == []
+
+
+def test_cleared_title_and_auto_titles_round_trip(env: Env) -> None:
+    a = base_assignment(env)
+    add_override(env.fake, a["id"], student_ids=[env.users["ann"]], title="Acc")
+    base = env.fetch()
+    cleared = current(base).overrides[0].model_copy(update={"title": None})
+    local = edit(base, only_path(base), overrides=[cleared])
+    _, result = env.push(base, local)
+    assert result.error is None
+    (put,) = env.writes()
+    assert put.body["assignment_override"]["title"] is None
+    assert env.overrides(a["id"])[0]["title"] == "1 students"  # Canvas's own title
+    assert plan_of(env.fetch(previous=local), local).is_empty()
+    # An auto-title typed into the file is never sent back as a custom title.
+    auto = Override(students=["ann", "bob"], title="2 students")
+    _, result = env.push(env.fetch(previous=local), edit(local, only_path(base), overrides=[auto]))
+    assert result.error is None
+    assert env.writes()[-1].body["assignment_override"]["title"] is None
 
 
 def test_group_override_add_and_remove(env: Env) -> None:

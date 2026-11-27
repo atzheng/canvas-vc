@@ -33,6 +33,7 @@ overrides contain ``unknown:<id>`` refs produces no change.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -94,20 +95,39 @@ class OverrideChange:
     after: Override | None
 
 
+AUTO_TITLE = re.compile(r"\d+ students?")  # Canvas's own title for an ad hoc student set
+
+
+def custom_title(o: Override) -> str | None:
+    """The title Canvas would keep: Canvas's auto-generated "N students" is not one."""
+    if not o.title or AUTO_TITLE.fullmatch(o.title):
+        return None
+    return o.title
+
+
 def _same(a: Override, b: Override) -> bool:
     """Equal as far as Canvas can store it (a section/group override has no custom title)."""
     if a.target() != b.target() or (a.unlock, a.due, a.lock) != (b.unlock, b.due, b.lock):
         return False
-    return a.students is None or (a.title or None) == (b.title or None)
+    return a.students is None or custom_title(a) == custom_title(b)
+
+
+def _loses_students(before: Override, after: Override) -> bool:
+    return not set(before.students or []) <= set(after.students or [])
 
 
 def diff_overrides(before: Sequence[Override], after: Sequence[Override]) -> list[OverrideChange]:
     """Minimal override changes, keyed by target (CONTRACTS.md section 4).
 
     Sections and groups match by name, student sets by their exact membership. A student set
-    whose membership changed matches the old one by a (non-empty) ``title`` that is unique on
-    both sides, else it is a remove plus an add. Unchanged overrides produce nothing. Order:
-    removes, updates, adds (a student moving between sets leaves the old one first).
+    whose membership changed is paired with the old one by a unique custom ``title``, then by
+    largest overlap of students (deterministic: ties broken by the sorted student lists), so
+    that a student who stays is always in an override: one PUT with the full ``student_ids``.
+    Only sets with no student in common are remove plus add.
+
+    Order (Canvas allows a student in only one override per assignment, so a moving student
+    has a brief gap, never two overrides): updates that drop students; adds; other updates;
+    removes. Adds come before removes, so no kept audience is ever left without an override.
     """
     old = {o.target(): o for o in before}
     new = {o.target(): o for o in after}
@@ -115,18 +135,40 @@ def diff_overrides(before: Sequence[Override], after: Sequence[Override]) -> lis
     gone = [o for k, o in old.items() if k not in new]
     fresh = [o for k, o in new.items() if k not in old]
     for o in list(gone):
-        if o.students is None or not o.title:
+        title = custom_title(o)
+        if o.students is None or title is None:
             continue
-        same_old = [g for g in gone if g.students is not None and g.title == o.title]
-        cands = [f for f in fresh if f.students is not None and f.title == o.title]
+        same_old = [g for g in gone if g.students is not None and custom_title(g) == title]
+        cands = [f for f in fresh if f.students is not None and custom_title(f) == title]
         if len(same_old) == 1 and len(cands) == 1:
             pairs.append((o, cands[0]))
             gone.remove(o)
             fresh.remove(cands[0])
-    out = [OverrideChange("remove", o, None) for o in gone]
-    out += [OverrideChange("update", b, a) for b, a in pairs if not _same(b, a)]
-    out += [OverrideChange("add", None, o) for o in fresh]
-    return out
+    overlaps = sorted(
+        (
+            (-len(set(g.students or []) & set(f.students or [])), g.students, f.students, g, f)
+            for g in gone
+            for f in fresh
+            if g.students is not None
+            and f.students is not None
+            and set(g.students) & set(f.students)
+        ),
+        key=lambda t: t[:3],
+    )
+    for _, _, _, g, f in overlaps:
+        if g in gone and f in fresh:
+            pairs.append((g, f))
+            gone.remove(g)
+            fresh.remove(f)
+    updates = [OverrideChange("update", b, a) for b, a in pairs if not _same(b, a)]
+    shrinking = [c for c in updates if c.before and c.after and _loses_students(c.before, c.after)]
+    others = [c for c in updates if c not in shrinking]
+    return [
+        *shrinking,
+        *(OverrideChange("add", None, o) for o in fresh),
+        *others,
+        *(OverrideChange("remove", o, None) for o in gone),
+    ]
 
 
 def access_narrowed(

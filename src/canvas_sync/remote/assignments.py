@@ -16,7 +16,6 @@ external-tool assignments are not mirrored (they are managed elsewhere in Canvas
 
 from __future__ import annotations
 
-import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Literal, cast
@@ -30,9 +29,11 @@ from canvas_sync.model.assignment import Assignment
 from canvas_sync.model.base import CanvasObject, Kind, ObjectKey
 from canvas_sync.model.overrides import Override, validate_overrides
 from canvas_sync.plan.assignments import (
+    AUTO_TITLE,
     AssignmentGroup,
     OverrideChange,
     assignment_changes,
+    custom_title,
     diff_overrides,
     group_key,
 )
@@ -47,7 +48,6 @@ from canvas_sync.render.md2html import md_to_html
 FOLDER = "assignments"
 _PER_PAGE = {"per_page": 100}
 _NOT_MIRRORED_TYPES = {"online_quiz", "discussion_topic", "external_tool", "attendance"}
-_AUTO_TITLE = re.compile(r"\d+ students?")  # Canvas's own title for an ad hoc student set
 PathMap = Mapping[tuple[Kind, int | str], str]
 
 
@@ -164,7 +164,7 @@ def _override(raw: dict[str, Any], ctx: FetchContext, where: str) -> Override | 
             return None
         if unknown:
             _warn(f"{where}: override names {unknown} student(s) not in the roster cache")
-        keep = isinstance(title, str) and title and not _AUTO_TITLE.fullmatch(title)
+        keep = isinstance(title, str) and title and not AUTO_TITLE.fullmatch(title)
         return Override(
             students=refs, title=title if keep else None, unlock=unlock, due=due, lock=lock
         )
@@ -404,7 +404,9 @@ def _resolve(o: Override, ctx: ApplyContext, path: str) -> _Target:
         ids: set[int] = set()
         missing = 0
         for ref in o.students:
-            uid = _unknown_id(ref) or ctx.roster.students.get(ref)
+            uid = _unknown_id(ref)
+            if uid is None:
+                uid = ctx.roster.students.get(ref)
             if uid is None:
                 missing += 1
             else:
@@ -418,7 +420,9 @@ def _resolve(o: Override, ctx: ApplyContext, path: str) -> _Target:
     kind, name = ("section", o.section) if o.section is not None else ("group", o.group)
     assert name is not None
     table = ctx.roster.sections if kind == "section" else ctx.roster.groups
-    oid = _unknown_id(name) or table.get(name)
+    oid = _unknown_id(name)
+    if oid is None:
+        oid = table.get(name)
     if oid is None:
         raise ValidationError(f"{path}: unknown {kind} {name!r} in an override; run canvas fetch")
     return _Target(kind, frozenset({oid}))
@@ -452,8 +456,11 @@ def _override_body(o: Override, target: _Target, *, create: bool) -> dict[str, A
     }
     if target.kind == "students":
         body["student_ids"] = sorted(target.ids)
-        if o.title:
-            body["title"] = o.title
+        title = custom_title(o)
+        if title is not None:
+            body["title"] = title
+        elif not create:
+            body["title"] = None  # cleared: Canvas falls back to its own "N students"
     elif create:
         body["course_section_id" if target.kind == "section" else "group_id"] = next(
             iter(target.ids)
@@ -489,25 +496,37 @@ def _plan_override_writes(
                 live.append((int(raw["id"]), raw, lt))
 
     def find(old: _Target, title: str | None) -> int | None:
-        for oid, _, lt in live:
-            if lt == old:
-                return oid
+        exact = [oid for oid, _, lt in live if lt == old]
+        if len(exact) > 1:
+            raise ValidationError(
+                f"{path}: more than one Canvas override targets the same {old.kind}; "
+                "fix it in Canvas first"
+            )
+        if exact:
+            return exact[0]
         if old.kind == "students" and title:  # membership drifted on Canvas: match by title
             hits = [
                 oid for oid, raw, lt in live if lt.kind == "students" and raw.get("title") == title
             ]
-            if len(hits) == 1:
+            if len(hits) > 1:
+                raise ValidationError(
+                    f"{path}: more than one Canvas student override has the title {title!r}; "
+                    "fix it in Canvas first"
+                )
+            if hits:
                 return hits[0]
         return None
 
     steps: list[_Step] = []
     for c, old, new in resolved:
         if c.kind == "remove" and old is not None and c.before is not None:
-            oid = find(old, c.before.title)
+            oid = find(old, custom_title(c.before))
             if oid is not None:  # already gone on Canvas: nothing to do
                 steps.append(_Step("DELETE", oid, None))
         elif c.after is not None and new is not None:
-            oid = find(old, c.before.title if c.before else None) if old else find(new, None)
+            oid = (
+                find(old, custom_title(c.before) if c.before else None) if old else find(new, None)
+            )
             if oid is None:
                 steps.append(_Step("POST", None, _override_body(c.after, new, create=True)))
             else:
