@@ -194,7 +194,25 @@ def access_narrowed(
     return False
 
 
-def _risks(path: str, changes: dict[str, tuple[Any, Any]]) -> tuple[Risk, ...]:
+def moved_students(before: Sequence[Override], after: Sequence[Override]) -> int:
+    """Students who leave one student-set override and join another. They are written as two
+    PUTs, so each is in no override between them."""
+    changes = diff_overrides(before, after)
+    left = {s for c in changes if c.before and c.after for s in _lost(c.before, c.after)}
+    joined = {
+        s
+        for c in changes
+        if c.after is not None
+        for s in set(c.after.students or []) - set((c.before.students if c.before else None) or [])
+    }
+    return len(left & joined)
+
+
+def _lost(before: Override, after: Override) -> set[str]:
+    return set(before.students or []) - set(after.students or [])
+
+
+def _risks(path: str, changes: dict[str, tuple[Any, Any]], only: bool = False) -> tuple[Risk, ...]:
     risks: list[Risk] = []
     if "points" in changes or "grading_type" in changes:
         msg = f"{path}: points/grading_type change reinterprets or rescales existing scores"
@@ -204,6 +222,13 @@ def _risks(path: str, changes: dict[str, tuple[Any, Any]]) -> tuple[Risk, ...]:
         only_old, only_new = changes.get("assign_to_overrides_only", (False, False))
         if access_narrowed(ov_old, ov_new, bool(only_old), bool(only_new)):
             msg = f"{path}: removes an override audience; students who submitted lose access"
+            risks.append(Risk(RiskKind.ACCESS_REMOVED, msg, CONFIRM_ACCESS))
+        moved = moved_students(ov_old, ov_new) if only else 0
+        if moved:
+            msg = (
+                f"{path}: {moved} student(s) move between override sets; each is in no override "
+                "between the two writes (transient unless the push fails, then they lose access)"
+            )
             risks.append(Risk(RiskKind.ACCESS_REMOVED, msg, CONFIRM_ACCESS))
     return tuple(risks)
 
@@ -251,7 +276,14 @@ def diff_type(base: Course, target: Course) -> list[Operation]:
         if changes:
             key = ObjectKey(Kind.ASSIGNMENT, path)
             updates.append(
-                Operation(key, Action.UPDATE, before, after, changes, _risks(path, changes))
+                Operation(
+                    key,
+                    Action.UPDATE,
+                    before,
+                    after,
+                    changes,
+                    _risks(path, changes, after.assign_to_overrides_only),
+                )
             )
 
     known_groups = {o.group for o in old.values() if o.group is not None}

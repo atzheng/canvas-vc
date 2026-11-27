@@ -111,7 +111,7 @@ def current(course: Course) -> Assignment:
 
 
 def base_assignment(env: Env, **fields: Any) -> dict[str, Any]:
-    return add_assignment(env.fake, "HW", points_possible=10.0, due_at=DUE, **fields)
+    return add_assignment(env.fake, "HW", points_possible=10.0, **{"due_at": DUE, **fields})
 
 
 # ---- differ (pure) ---------------------------------------------------------------------
@@ -286,6 +286,36 @@ def test_moving_a_student_between_sets_never_double_covers(env: Env) -> None:
     _, result = env.push(base, edit(base, only_path(base), overrides=moved))
     assert result.error is None, result.error  # the fake rejects a student in two overrides
     assert [w.method for w in env.writes()] == ["PUT", "PUT"]
+
+
+def test_cross_set_move_needs_confirmation_when_overrides_only(env: Env) -> None:
+    a = base_assignment(env, only_visible_to_overrides=True, due_at=None)
+    add_override(env.fake, a["id"], student_ids=[env.users["ann"], env.users["bob"]], title="A")
+    add_override(env.fake, a["id"], student_ids=[env.users["cy"]], title="B")
+    base = env.fetch()
+    by_title = {o.title: o for o in current(base).overrides}
+    moved = [
+        by_title["A"].model_copy(update={"students": ["ann"]}),
+        by_title["B"].model_copy(update={"students": ["bob", "cy"]}),
+    ]
+    target = edit(base, only_path(base), overrides=moved)
+    (op,) = plan_of(base, target).ops
+    (risk,) = op.risks
+    assert risk.kind is RiskKind.ACCESS_REMOVED and risk.needs_confirm == CONFIRM_ACCESS
+    assert "1 student(s) move" in risk.message and "transient" in risk.message
+    assert "bob" not in risk.message
+    with pytest.raises(GuardBlocked):
+        env.push(base, target)
+    assert env.writes() == []
+    _, result = env.push(base, target, {CONFIRM_ACCESS})
+    assert result.error is None
+    # Without overrides-only ("everyone else" still has access) the move needs no flag.
+    assert (
+        plan_of(base, edit(base, only_path(base), overrides=moved, assign_to_overrides_only=False))
+        .ops[0]
+        .risks
+        == ()
+    )
 
 
 def test_ambiguous_live_overrides_are_refused_before_any_write(env: Env) -> None:
