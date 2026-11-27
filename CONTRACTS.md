@@ -789,10 +789,13 @@ def record_fetch_time(root, when_iso: str) -> None          # run_fetch writes t
 def last_fetch_time(root) -> str | None                     # .git/canvas-last-fetch, else canvas/main commit time
 ```
 
-**Plan for push and diff.** `commands/diff.py: build_plan(root) -> Plan` is
-`plan.core.diff(load_course_at(canvas/main), load_course_at(HEAD))`; `canvas diff` prints
-`plan.render()`. `push` should call the same function (it raises `CanvasSyncError` when
-canvas/main or HEAD is missing). `canvas status` reports the remote-moved check from
+**Plan for push and diff.** `commands/diff.py: build_plan(root, ignore=None, *, head=None,
+main=None) -> PlanTrees(plan, base, target)` is offline: it loads `canvas/main` and HEAD with
+`load_course_at`, drops everything `.canvasignore` matches (default: the file as committed at
+HEAD) from both trees, and returns `plan.core.diff(base, target)` with the two filtered trees.
+`canvas diff`/`status` print/list `.plan`; `push` calls the same function, so the plans are
+identical (it raises `CanvasSyncError` when canvas/main or HEAD is missing).
+`canvas status` reports the remote-moved check from
 GET list calls (pages, assignments, announcements) whose `updated_at` is later than
 `last_fetch_time`; modules and files are not part of this cheap check.
 

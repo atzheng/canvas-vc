@@ -167,18 +167,18 @@ def test_pull_cli_uses_read_client_only(
 
 
 def test_diff_matches_core_plan_and_ignores_canvas_dir(repo: Path) -> None:
-    assert diff_cmd.build_plan(repo).is_empty()
+    assert diff_cmd.build_plan(repo).plan.is_empty()
     (repo / SYLLABUS).write_text((repo / SYLLABUS).read_text() + "\nmore\n")
     (repo / ".canvas").mkdir(exist_ok=True)
     (repo / ".canvas/note.txt").write_text("x")
     commit(repo)
-    plan = diff_cmd.build_plan(repo)
+    plan = diff_cmd.build_plan(repo).plan
     assert [(o.action.value, o.key.path) for o in plan.ops] == [("update", SYLLABUS)]
 
 
 def test_diff_ignores_uncommitted_edits(repo: Path) -> None:
     (repo / SYLLABUS).write_text("uncommitted\n")
-    assert diff_cmd.build_plan(repo).is_empty()
+    assert diff_cmd.build_plan(repo).plan.is_empty()
 
 
 def test_diff_cli_output_and_errors(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:

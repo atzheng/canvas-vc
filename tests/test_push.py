@@ -380,6 +380,21 @@ def test_ignored_file_is_not_a_delete(fake: FakeCanvas, s: Seed, repo: Path) -> 
     fake.assert_submissions_intact(snap)
 
 
+def test_diff_plan_matches_push_plan_with_ignored_deletion(
+    fake: FakeCanvas, s: Seed, repo: Path
+) -> None:
+    from canvas_sync.commands.diff import build_plan
+
+    write(repo, ".canvasignore", "assignments/homework-1.md\n")
+    (repo / "assignments/homework-1.md").unlink()
+    edit(repo, "pages/syllabus.md", "Welcome", "Hello")
+    commit(repo)
+    plan = build_plan(repo).plan
+    assert [(o.action.value, o.key.path) for o in plan.ops] == [("update", "pages/syllabus.md")]
+    _, out = push(fake, repo, dry_run=True)
+    assert "pages/syllabus.md" in out and "homework-1" not in out
+
+
 def test_dry_run_writes_nothing(fake: FakeCanvas, s: Seed, repo: Path, home: Path) -> None:
     edit(repo, "assignments/homework-2.md", "Two", "Two, revised")
     write(repo, "pages/new-page.md", "---\ntitle: New Page\n---\nHi\n")

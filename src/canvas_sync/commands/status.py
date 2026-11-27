@@ -78,7 +78,7 @@ def local_lines(root: Path) -> list[str]:
 def unpushed_lines(root: Path) -> list[str]:
     """One line per operation push would perform; a single line if the plan cannot be built."""
     try:
-        plan = build_plan(root)
+        plan = build_plan(root).plan
     except (CanvasSyncError, NotImplementedError) as e:
         return [f"cannot compute plan: {e or type(e).__name__}"]
     return [f"{op.action.value} {op.key.path}" for op in plan.ops]
