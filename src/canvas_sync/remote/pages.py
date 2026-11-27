@@ -8,13 +8,14 @@ from urllib.parse import quote
 
 from rich.console import Console
 
-from canvas_sync.dates import from_canvas
-from canvas_sync.errors import CanvasAPIError
-from canvas_sync.model.base import CanvasObject, Kind
+from canvas_sync.dates import from_canvas, to_canvas
+from canvas_sync.errors import CanvasAPIError, CanvasSyncError
+from canvas_sync.model.base import CanvasObject, Kind, ObjectKey
 from canvas_sync.model.page import Page
+from canvas_sync.plan.pages import PlacedPage
 from canvas_sync.remote.context import ApplyContext, FetchContext
 from canvas_sync.remote.http import CanvasClient
-from canvas_sync.remote.paths import previous_objects, read_body, unique_path
+from canvas_sync.remote.paths import previous_objects, read_body, render_body, unique_path
 
 FOLDER = "pages"
 
@@ -146,18 +147,99 @@ def read(
     return out
 
 
+def _slug_path(ctx: ApplyContext, slug: str) -> str:
+    return f"/courses/{ctx.config.course_id}/pages/{quote(slug, safe='')}"
+
+
+def _fields(ctx: ApplyContext, obj: Page, before: Page | None, key_path: str) -> dict[str, Any]:
+    """The ``wiki_page`` fields to send: all set ones for a create, changed ones otherwise.
+
+    A cleared ``publish_at`` is sent as an explicit null. ``published: None`` means no
+    opinion: a create uses ``course.yaml`` defaults, an update leaves it alone.
+    """
+    out: dict[str, Any] = {}
+    if before is None or obj.title != before.title:
+        out["title"] = obj.title
+    if before is None or (obj.body, obj.body_format) != (before.body, before.body_format):
+        out["body"] = render_body(ctx, key_path, obj.body, obj.body_format)
+    if before is None:
+        published = obj.published
+        out["published"] = ctx.config.defaults.published if published is None else published
+        if obj.publish_at is not None:
+            out["publish_at"] = to_canvas(obj.publish_at)
+        if obj.front_page:
+            out["front_page"] = True
+        return out
+    if obj.published is not None and obj.published != before.published:
+        out["published"] = obj.published
+    if obj.publish_at != before.publish_at:
+        out["publish_at"] = to_canvas(obj.publish_at)
+    if obj.front_page != before.front_page:
+        out["front_page"] = obj.front_page
+    return out
+
+
+def _key_path(obj: Page) -> str:
+    return obj.key_path if isinstance(obj, PlacedPage) else ""
+
+
+def _record(ctx: ApplyContext, obj: Page, key_path: str, row: dict[str, Any], sent: bool) -> None:
+    """Remember the Markdown for the HTML Canvas now holds, so fetch reuses it."""
+    if not key_path or not sent or obj.body_format == "html":
+        return
+    html = row.get("body")
+    if isinstance(html, str):
+        ctx.bodies.record(key_path, obj.body, html)
+
+
 def create(client: CanvasClient, obj: CanvasObject, ctx: ApplyContext) -> int | str:
-    """Returns the new canvas_id."""
-    raise NotImplementedError
+    """POST the page; returns its url slug (a str: module items refer to pages by it)."""
+    page = _as_page(obj)
+    key_path = _key_path(page)
+    c = ctx.config.course_id
+    row = client.post(f"/courses/{c}/pages", json={"wiki_page": _fields(ctx, page, None, key_path)})
+    slug = str(row["url"])
+    if key_path:
+        ctx.ids[ObjectKey(Kind.PAGE, key_path)] = slug
+    _record(ctx, page, key_path, row, True)
+    return slug
 
 
 def update(
     client: CanvasClient, before: CanvasObject, after: CanvasObject, ctx: ApplyContext
 ) -> None:
-    """Only changed fields are sent."""
-    raise NotImplementedError
+    """PUT only the changed fields.
+
+    Canvas changes a page's url slug when its title changes. The PUT response carries the
+    new slug; it is put in ``ctx.ids`` under the page's key, and ``apply`` reports a
+    changed id in ``ApplyResult.new_ids``, so push writes the new ``canvas_id`` back (and
+    module refs, which use the slug, stay right).
+    """
+    old, new = _as_page(before), _as_page(after)
+    key_path = _key_path(new)
+    if old.canvas_id is None:
+        raise CanvasSyncError(f"{key_path or new.title}: page has no Canvas id")
+    fields = _fields(ctx, new, old, key_path)
+    if not fields:
+        return
+    slug = str(old.canvas_id)
+    row = client.put(_slug_path(ctx, slug), json={"wiki_page": fields})
+    new_slug = str(row.get("url") or slug) if isinstance(row, dict) else slug  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
+    if key_path:
+        ctx.ids[ObjectKey(Kind.PAGE, key_path)] = new_slug
+    if isinstance(row, dict):
+        _record(ctx, new, key_path, row, "body" in fields)  # pyright: ignore[reportUnknownArgumentType]
 
 
 def delete(client: CanvasClient, obj: CanvasObject, ctx: ApplyContext) -> None:
-    """Goes through the submission guard."""
-    raise NotImplementedError
+    """DELETE the page (pages carry no student work; the guard does not apply)."""
+    page = _as_page(obj)
+    if page.canvas_id is None:
+        raise CanvasSyncError(f"page {page.title!r} has no Canvas id")
+    client.delete(_slug_path(ctx, str(page.canvas_id)))
+
+
+def _as_page(obj: CanvasObject) -> Page:
+    if not isinstance(obj, Page):
+        raise CanvasSyncError(f"expected a page, got {type(obj).__name__}")
+    return obj

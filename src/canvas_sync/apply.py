@@ -126,7 +126,15 @@ def apply(
         try:
             if needs_guard(op):  # just-in-time, for live state
                 ctx.guard.assert_allowed(op, confirmed)
+            before_id = ctx.ids.get(op.key)
             new_id = _run(op, _writer(op.key.kind, writers), client, ctx)
+            # An update may change the id (a renamed page's slug). This compares against
+            # ctx.ids, so push must pre-fill ctx.ids with every existing id (str slugs for
+            # pages) before apply; otherwise an unchanged id would be reported as new.
+            if new_id is None:
+                changed = ctx.ids.get(op.key)
+                if changed is not None and changed != before_id and op.action is not Action.DELETE:
+                    new_id = changed
         except Exception as e:
             result.failed, result.error = op, e
             return result

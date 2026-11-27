@@ -423,3 +423,20 @@ def test_announcement_posting_now_refused_without_confirm_notify_even_if_differ_
     assert log == []
     res = apply(plan, cast(Any, None), ctx, confirmed={"--confirm-notify"}, writers=writers)
     assert res.error is None and len(log) == 1
+
+
+def test_apply_reports_id_changed_by_an_update() -> None:
+    class Renamer(FakeWriter):
+        def update(
+            self, client: CanvasClient, before: CanvasObject, after: CanvasObject, ctx: ApplyContext
+        ) -> None:
+            ctx.ids[ObjectKey(Kind.PAGE, "pages/a.md")] = "new-slug"
+
+    key = ObjectKey(Kind.PAGE, "pages/a.md")
+    plan = Plan(
+        [Operation(key, Action.UPDATE, Page(canvas_id="a", title="A"), Page(title="B"), {})]
+    )
+    ctx = make_ctx(FakeGuard())
+    ctx.ids[key] = "a"
+    res = apply(plan, cast(Any, None), ctx, confirmed=set(), writers={Kind.PAGE: Renamer([])})
+    assert res.new_ids == {key: "new-slug"}
