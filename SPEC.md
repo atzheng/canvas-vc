@@ -499,7 +499,7 @@ code by four independent layers, not left to good intentions.
 | Change `group_category` (group vs. individual assignment) | changes who owns submissions | **blocked** once submissions exist (Canvas also refuses) |
 | Change `grading_type` or `points` | existing scores are reinterpreted or rescaled | allowed only with `--confirm-grading-change hw1`. The plan shows how many graded submissions are affected |
 | Change the due date (base or an override's) when a late policy is on; unlock/lock changes don't trigger it | Canvas recalculates late penalties, which **changes existing grades** | warned in plan with a count of affected graded submissions. Needs `--confirm-grading-change` |
-| Remove a student or section from an override, or turn on `assign_to_overrides_only` | the student loses access, and their submission is hidden from them (but kept) | warned in plan, listing affected students who have submitted. Needs confirmation |
+| Remove a student or section from an override, or turn on `assign_to_overrides_only` | the student loses access, and Canvas **hides** their submission (its `workflow_state` becomes `deleted`; body, attempt and `submitted_at` are intact, and it returns to `submitted` when access is restored) | warned in plan, naming the audiences that lose access and saying Canvas will hide their submissions until access is restored. Needs `--confirm-access-removal` |
 | Unpublish an assignment with submissions | Canvas refuses | not attempted; reported |
 | Change `submission_types` | existing submissions are kept | allowed, with a warning if submissions exist |
 
@@ -531,6 +531,20 @@ code by four independent layers, not left to good intentions.
    touch to `~/.canvas-sync/backups/<course>/<timestamp>.json`, outside the
    repo, because it contains student data. Combined with Canvas's own
    gradebook history, every grade change the tool causes is reversible.
+
+**Access removal hides submissions (observed on the sandbox).** When a
+confirmed push removes a submitted student's only access (their only
+override is removed on an assignment visible only to overrides, or
+`assign_to_overrides_only` turns on while they are in no override), Canvas
+sets that student's submission to `workflow_state: deleted`. This is a
+hide, not a destruction: the work is intact and putting the student back
+(restoring the override, or turning overrides-only off) brings it back as
+it was. It is the one case where a push changes a submission's visible
+state, so it is behind its own flag, `--confirm-access-removal`, and the
+plan and guard messages say so in words. Without the flag the push is
+refused. The safety suite expects exactly this hidden state in the
+`override_removal` scenario (and nowhere else) and checks that
+`access_restored` returns the submission unchanged.
 
 Integration test: a sandbox course with a test student who has submitted to
 every assignment. The test runs every push scenario, including deleting

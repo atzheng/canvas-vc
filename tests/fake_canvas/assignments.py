@@ -13,6 +13,11 @@ refused (the tool must never replace the whole override set), as is unpublishing
 with submissions (Canvas answers 400). ``DELETE`` removes only the assignment record:
 ``fake.submissions`` is never touched here (real Canvas soft-deletes them, which the tool must
 never cause), so tests assert on ``fake.log`` that no DELETE reached such an assignment.
+Hide/restore: when an assignment is only visible to overrides, a student with a student or
+section override keeps access; any other student's submission goes to ``workflow_state ==
+"deleted"`` (hidden, all else intact) and returns to its previous state once re-assigned (see
+``sync_visibility``; group membership is not modelled). Runs after every override write and
+assignment PUT.
 Override writes: ``POST /assignments/:a/overrides`` and ``PUT/DELETE .../overrides/:id`` with a
 body ``{"assignment_override": {...}}``: one of ``course_section_id`` / ``group_id`` /
 ``student_ids``, ``title`` (ad hoc sets default to "N students"), ``due_at`` / ``unlock_at`` /
@@ -35,6 +40,43 @@ def _store(fake: FakeCanvas) -> dict[str, Any]:
     st.setdefault("overrides", {})
     st.setdefault("groups", {})
     return st
+
+
+def sync_visibility(fake: FakeCanvas, aid: int) -> None:
+    """Model Canvas hiding submissions of students who are no longer assigned.
+
+    When an assignment is only visible to overrides, a student with no student or section
+    override has their submission set to ``workflow_state == "deleted"`` (hidden; every other
+    field untouched). When they are assigned again it returns to its previous state. Group
+    membership is not modelled, so a group override assigns nobody here. The state to restore
+    is kept in ``fake.state("assignments")["hidden"]``, not on the submission row.
+    """
+    st = _store(fake)
+    a = st["assignments"].get(aid)
+    if a is None:
+        return
+    hidden: dict[tuple[int, int], str] = st.setdefault("hidden", {})
+    assigned: set[int] = set()
+    if a.get("only_visible_to_overrides"):
+        sections: set[int] = set()
+        for o in st["overrides"].get(aid, []):
+            assigned |= {int(u) for u in o.get("student_ids") or []}
+            if o.get("course_section_id") is not None:
+                sections.add(int(o["course_section_id"]))
+        assigned |= {
+            int(e["user_id"])
+            for e in fake.enrollments.values()
+            if e.get("course_section_id") in sections
+        }
+    for sub in fake.submissions.get(aid, []):
+        uid = int(sub["user_id"])
+        key = (aid, uid)
+        visible = not a.get("only_visible_to_overrides") or uid in assigned
+        if not visible and sub.get("workflow_state") != "deleted":
+            hidden[key] = sub["workflow_state"]
+            sub["workflow_state"] = "deleted"
+        elif visible and key in hidden:
+            sub["workflow_state"] = hidden.pop(key)
 
 
 def add_assignment_group(fake: FakeCanvas, name: str, **fields: Any) -> dict[str, Any]:
@@ -194,6 +236,7 @@ def register(fake: FakeCanvas) -> None:
         ):
             raise CanvasError(400, "Cannot unpublish assignment with student submissions")
         a.update(body)
+        sync_visibility(fake, a["id"])
         return flagged(a)
 
     def delete(q: Req) -> dict[str, Any]:
@@ -254,7 +297,9 @@ def register(fake: FakeCanvas) -> None:
             body.setdefault("title", f"{len(body['student_ids'])} students")
         else:
             body.setdefault("title", "section" if "course_section_id" in body else "group")
-        return add_override(fake, aid, **body)
+        out = add_override(fake, aid, **body)
+        sync_visibility(fake, aid)
+        return out
 
     def find_override(q: Req) -> dict[str, Any]:
         aid, oid = int(q.match.group(1)), int(q.match.group(2))
@@ -274,6 +319,7 @@ def register(fake: FakeCanvas) -> None:
         o.update(body)
         if "student_ids" in o and not o.get("title"):  # a cleared title: Canvas regenerates it
             o["title"] = f"{len(o['student_ids'])} students"
+        sync_visibility(fake, o["assignment_id"])
         return dict(o)
 
     def delete_override(q: Req) -> dict[str, Any]:
@@ -283,6 +329,7 @@ def register(fake: FakeCanvas) -> None:
         rows = _store(fake)["overrides"][o["assignment_id"]]
         rows.remove(o)
         _store(fake)["assignments"][o["assignment_id"]]["has_overrides"] = bool(rows)
+        sync_visibility(fake, o["assignment_id"])
         return dict(o)
 
     fake.route("POST", r"/courses/{c}/assignments/(\d+)/overrides", create_override)

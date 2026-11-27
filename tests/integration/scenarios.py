@@ -208,24 +208,29 @@ def override_added_for_test_student(h: Harness) -> str:
 
 def override_removal(h: Harness) -> str:
     """Remove the only override while overrides-only stays on: the submitter loses access.
-    Refused without --confirm-access-removal; with it the push may proceed; the submission is
-    intact either way (compared by ``h.scenario()``)."""
+    Refused without --confirm-access-removal (submission untouched). With the flag the push
+    goes through and Canvas hides the submission: workflow_state "deleted" with body, attempt
+    and submitted_at unchanged. This is the one scenario allowed to see that hidden state;
+    ``access_restored`` brings the submission back."""
     if not (h.assignment("access") or {}).get("only_visible_to_overrides"):
         raise Refused("override_added_for_test_student did not apply the override")
     with h.scenario():
         _drop_override_keep_overrides_only(h)
         _commit_edit(h, "remove override")
         a = _expect_blocked(h, "override removal unconfirmed")
-    with h.scenario():
+    with h.scenario(hidden={"access"}):  # exactly this expected hidden state, nothing else
         _drop_override_keep_overrides_only(h)
         _commit_edit(h, "remove override")
         result = h.push(confirmed=set(ACCESS))
-        b = "confirmed removal pushed" if result.ok else f"push stopped: {h.last_output[-100:]}"
-    return f"{a}; {b}"
+        assert result.ok, f"confirmed removal did not push: {h.last_output[-200:]}"
+        assert "hide their submissions" in " ".join(h.last_output.split()), "plan lacks warning"
+    return f"{a}; confirmed removal pushed, submission hidden (not destroyed)"
 
 
 def access_restored(h: Harness) -> str:
-    """Put 'access' back to a plain assignment (overrides-only off, no override)."""
+    """Put 'access' back to a plain assignment (overrides-only off, no override). The submission
+    hidden by ``override_removal`` comes back, equal to the baseline (checked by
+    ``h.scenario()``, with no hidden state allowed here)."""
     with h.scenario():
         _access_off(h)
         _commit_edit(h, "restore access")
