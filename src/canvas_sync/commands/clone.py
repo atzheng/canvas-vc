@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 from pathlib import Path
 from typing import Annotated, cast
@@ -45,9 +46,14 @@ def clone_course(
 ) -> FetchResult:
     """Create the repo at ``root``, fetch, and check out ``main`` at canvas/main.
 
-    The snapshot carries course.yaml, roster.yaml and everything else; the checkout then
-    gets one extra commit for ``.gitignore`` (the roster cache and aliases stay untracked;
-    ``.canvas/bodies.json`` is tracked, written only by fetch).
+    The snapshot carries course.yaml, roster.yaml and everything else, including
+    ``.canvas/bodies.json``. That file is written only into canvas/main snapshots, but it is
+    a tracked file of the tree, so the fast-forward brings it into ``main`` too (SPEC:
+    "written only by fetch"; CONTRACTS section 2: "written only into snapshots"; push
+    likewise fast-forwards to canvas/main and treats ``.canvas/`` as metadata). The
+    checkout then gets one extra commit for ``.gitignore`` (the roster cache and aliases
+    stay untracked). If anything fails after the directory was touched, it is removed
+    (or emptied again, when it already existed empty).
     """
     if root.exists() and any(root.iterdir()):
         raise CanvasSyncError(f"{root}: directory exists and is not empty")
@@ -57,7 +63,32 @@ def clone_course(
         )
     except ValueError as e:
         raise ConfigError(f"course.yaml: {str(e).splitlines()[0]}") from None
+    existed = root.exists()
+    top = root  # the highest directory clone creates
+    while not existed and not top.parent.exists():
+        top = top.parent
     root.mkdir(parents=True, exist_ok=True)
+    try:
+        return _clone_into(client, root, config)
+    except BaseException:
+        _undo(root, top, existed)
+        raise
+
+
+def _undo(root: Path, top: Path, existed: bool) -> None:
+    """Remove what clone created: the whole directory, or only its contents if it
+    already existed (it was empty, checked before)."""
+    if not existed:
+        shutil.rmtree(top, ignore_errors=True)
+        return
+    for child in root.iterdir():
+        if child.is_dir() and not child.is_symlink():
+            shutil.rmtree(child, ignore_errors=True)
+        else:
+            child.unlink(missing_ok=True)
+
+
+def _clone_into(client: CanvasClient, root: Path, config: CourseConfig) -> FetchResult:
     _git(root, "init", "--quiet", "--initial-branch=main")
     result = run_fetch(root, client, config)
     if not gitops.fast_forward(root):

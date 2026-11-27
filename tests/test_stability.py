@@ -383,3 +383,33 @@ def test_local_comment_in_course_yaml_does_not_make_a_commit(fake: FakeCanvas, r
     p.write_text("# my notes\n" + p.read_text())
     git(repo, "commit", "-qam", "comment")
     assert fetch(fake, repo) is None
+
+
+def test_uncommitted_config_and_ignore_edits_do_not_reach_canvas_main(
+    fake: FakeCanvas, s: Seed, repo: Path
+) -> None:
+    before = gitops.ref_commit(repo)
+    (repo / ".canvasignore").write_text("pages/notes\n")  # uncommitted
+    cfg = (repo / "course.yaml").read_text().replace(TZ, "America/Toronto")
+    (repo / "course.yaml").write_text(cfg)  # uncommitted
+    s.hw1["points_possible"] = 11
+    commit = fetch(fake, repo)
+    assert commit is not None
+    assert changed_in(repo, commit) == ["assignments/homework-1.md"]
+    files = tree(repo)
+    assert "pages/notes.md" in files and TZ.encode() in files["course.yaml"]
+    assert before is not None
+
+
+def test_clone_failure_removes_what_it_created(fake: FakeCanvas, s: Seed, tmp_path: Path) -> None:
+    fake.fail(500, method="GET", path=r"/courses/101/pages", times=None)
+    new = tmp_path / "a" / "b"
+    with pytest.raises(Exception):  # noqa: B017
+        clone_course(fake.client("read"), URL, 101, new, TZ)
+    assert not (tmp_path / "a").exists()
+
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    with pytest.raises(Exception):  # noqa: B017
+        clone_course(fake.client("read"), URL, 101, empty, TZ)
+    assert empty.is_dir() and list(empty.iterdir()) == []
