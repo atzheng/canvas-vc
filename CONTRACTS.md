@@ -515,6 +515,8 @@ ref are skipped; duplicate refs or section names raise `ValidationError` (never 
 file I/O; `fetch_course` calls `write_cache(root, cache)` / `load_cache(root)`
 (`.canvas/roster-cache.json`).
 
+`remote/assignments.py`: `read(client, ctx) -> dict[str, CanvasObject]` (tree path -> `Assignment`), GET only: `/assignment_groups` (id -> `group` name) and `/assignments?include[]=overrides&override_assignment_dates=false`. Paths: previous path matched by `canvas_id`, else `assignments/<slug of name>.md` with `-2`, `-3` (new ones in Canvas id order); `.canvasignore`d paths are dropped. Quiz, discussion, external-tool and attendance assignments are not mirrored. Overrides resolve through `ctx.roster`: students by `ref_for`, sections/groups by name; anything missing from the cache becomes `unknown:<canvas id>` (students, groups, sections) with a one-line warning, never dropped. An ad hoc student set keeps its `title` unless it is Canvas's automatic `N students`. With `only_visible_to_overrides` the base dates are not read. Mastery-path (`noop_id`) overrides are not mirrored. Bodies: `ctx.bodies.matches(path, html)` reuses the previous body and format; else a previous `body_format: html` keeps the raw HTML; else `html_to_md`. Link paths come from `ctx.previous` plus this read's assignments. Two overrides sharing a student raise `ValidationError` (no names in the message).
+
 `remote/fetch.py`:
 
 ```python
