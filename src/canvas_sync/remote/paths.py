@@ -13,9 +13,10 @@ from collections.abc import Collection, Mapping
 
 from canvas_sync.model.base import CanvasObject, Kind, ObjectKey
 from canvas_sync.model.serialize import normalize_body
-from canvas_sync.remote.context import FetchContext
+from canvas_sync.remote.context import ApplyContext, FetchContext
 from canvas_sync.render.html2md import html_to_md
 from canvas_sync.render.links import LinkContext
+from canvas_sync.render.md2html import md_to_html
 
 SLUG_MAX = 80
 
@@ -109,3 +110,28 @@ def read_body(
     if not html.strip():
         return "", "md"
     return normalize_body(html_to_md(html, link_context(ctx, path, read, paths))), "md"
+
+
+def apply_link_context(ctx: ApplyContext, from_path: str) -> LinkContext:
+    """LinkContext for rendering the body at ``from_path`` during apply.
+
+    Ids come from ``ctx.ids`` alone (push pre-fills it with every known object and
+    ``apply`` adds creates), so a link to an object created later in the same push is left
+    as written; push renders again after the creates.
+    """
+    by_id: dict[tuple[Kind, int | str], str] = {(k.kind, v): k.path for k, v in ctx.ids.items()}
+
+    def ids(key: ObjectKey) -> int | str | None:
+        return ctx.ids.get(key)
+
+    def path_for(kind: Kind, cid: int | str) -> str | None:
+        return by_id.get((kind, cid))
+
+    return LinkContext(course_id=ctx.config.course_id, from_path=from_path, ids=ids, paths=path_for)
+
+
+def render_body(ctx: ApplyContext, path: str, body: str, body_format: str) -> str:
+    """The HTML to send for a body: ``html`` bodies verbatim, Markdown through md_to_html."""
+    if body_format == "html":
+        return body
+    return md_to_html(body, apply_link_context(ctx, path))

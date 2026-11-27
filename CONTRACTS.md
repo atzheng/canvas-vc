@@ -502,6 +502,7 @@ class ApplyContext:
     ids: dict[ObjectKey, int | str]  # filled in as creates happen; used to render links
     guard: SubmissionGuard
     blobs: BlobStore
+    bodies: Bodies                   # default empty; writers record (path, md, returned html)
 ```
 
 `remote/modules.py`: `read(client, ctx, *, paths: Mapping[tuple[Kind, int | str], str] | None = None) -> list[Module]`.
@@ -670,6 +671,8 @@ raised; the push CLI must report it as a stop, not a crash.
   Writers send JSON bodies (`{"module": {...}}`, `{"module_item": {...}}`) and look the
   predecessor up with a live GET of the module (or item) list. New modules are created
   unpublished and then published by a PUT; the new id is put in `ctx.ids` right after the POST. Page/assignment item titles are never sent. A local module delete never removes a module that still holds `unmanaged` items on Canvas: its managed items are deleted, the module stays, with a one-line warning. A hand-written `unmanaged` entry that carries a managed item's `canvas_id` is ignored (item kept) with a warning. The pages writer must return the str slug as its id (`_content_id` relies on it).
+
+**Pages and announcements writers** (`plan/pages.py`, `plan/announcements.py`; `remote/pages.py`, `remote/announcements.py`). Both differs pair by `canvas_id`, then by path for a target without one; a same-id file at a new path with no other change gives no operation. `after` is a `PlacedPage` / `PlacedAnnouncement` (the model plus `key_path`), which the writer uses to key `ctx.ids` and `ctx.bodies`. `published: None` on a page never produces a change; a page create uses `course.yaml` `defaults.published`. Writers send JSON (`{"wiki_page": {...}}`; topic fields at top level with `is_announcement: true`), only changed fields, null for a cleared date, and render Markdown with `md_to_html` using links resolved through `ctx.ids` (links to objects created later in the same push stay as written until push renders again). After each body write they call `ctx.bodies.record(key_path, md, html)` with the HTML in Canvas's response (`body` / `message`); `body_format: html` bodies are not recorded. **Page rename:** Canvas changes the slug when the title changes; `update` puts the new slug in `ctx.ids[key]` and `apply` reports any id that changed during an UPDATE in `ApplyResult.new_ids`, so push writes the new `canvas_id` back to the page file. Announcements: a deleted file is an UNPUBLISH (`POSTED_ANNOUNCEMENT` warning, no flag; nothing if already unpublished) and `delete()` itself only unpublishes; a create, or an update that makes it posted now, carries `NOTIFIES_STUDENTS` (`--confirm-notify`); editing an already-posted one carries the `POSTED_ANNOUNCEMENT` warning.
 
 ```python
 # errors.py

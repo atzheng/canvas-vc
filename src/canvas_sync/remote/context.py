@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from zoneinfo import ZoneInfo
 
 from canvas_sync.config import CourseConfig
@@ -34,3 +34,6 @@ class ApplyContext:
     ids: dict[ObjectKey, int | str]  # filled in as creates happen; used to render links
     guard: SubmissionGuard
     blobs: BlobStore
+    # Writers record (tree path, Markdown, HTML Canvas returned) here after each body write;
+    # push dumps it to .canvas/bodies.json so the next fetch reuses the Markdown.
+    bodies: Bodies = field(default_factory=Bodies)

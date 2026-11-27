@@ -126,7 +126,12 @@ def apply(
         try:
             if needs_guard(op):  # just-in-time, for live state
                 ctx.guard.assert_allowed(op, confirmed)
+            before_id = ctx.ids.get(op.key)
             new_id = _run(op, _writer(op.key.kind, writers), client, ctx)
+            if new_id is None:  # an update may change the id (a renamed page's slug)
+                changed = ctx.ids.get(op.key)
+                if changed is not None and changed != before_id and op.action is not Action.DELETE:
+                    new_id = changed
         except Exception as e:
             result.failed, result.error = op, e
             return result
