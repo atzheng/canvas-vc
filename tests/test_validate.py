@@ -204,7 +204,7 @@ def test_fix_idempotent_and_canonical(tmp_path: Path) -> None:
 
 
 def test_fix_refuses_conflicts_and_bad_files(tmp_path: Path) -> None:
-    root = tree(tmp_path, {"pages/a.md": "<<<<<<< HEAD\nx\n>>>>>>> o\n"})
+    root = tree(tmp_path, {"pages/a.md": "<<<<<<< HEAD\nx\n=======\ny\n>>>>>>> o\n"})
     before = snapshot(root)
     with pytest.raises(ValidationError):
         fix_tree(root)
@@ -225,3 +225,41 @@ def test_cli_exit_codes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None
     assert res.exit_code == 0, res.output
     assert "pages/a.md: rewritten in canonical form" in res.output
     assert "warning: .canvas/roster-cache.json" in res.output
+
+
+@pytest.mark.parametrize(
+    "rel",
+    [
+        "roster.yaml",
+        "modules.yaml",
+        "files/_meta.yaml",
+        "assignments/a.md",
+        "announcements/a.md",
+        "pages/a.md",
+    ],
+)
+def test_non_utf8_is_an_issue_not_a_crash(tmp_path: Path, rel: str) -> None:
+    root = tree(tmp_path)
+    write_files(root, {rel: b"\xff\xfe\x00bad\x80"})
+    out = [i for i in validate_tree(root, cache=CACHE) if i.severity == "error"]
+    assert out and all(i.path == rel for i in out)
+    with pytest.raises(ValidationError):
+        fix_tree(root)
+
+
+def test_conflicted_course_yaml(tmp_path: Path) -> None:
+    write_files(tmp_path, {"course.yaml": "<<<<<<< HEAD\na: 1\n=======\na: 2\n>>>>>>> o\n"})
+    assert msgs(tmp_path) == ["course.yaml: unresolved git conflict markers"]
+
+
+def test_lone_marker_in_code_block_is_not_a_conflict(tmp_path: Path) -> None:
+    body = "---\ntitle: A\n---\n\n```\n<<<<<<< HEAD\n```\n"
+    root = tree(tmp_path, {"pages/a.md": body})
+    assert msgs(root) == []
+
+
+def test_fix_warns_when_dropping_yaml_comments(tmp_path: Path) -> None:
+    root = tree(tmp_path, {"modules.yaml": "# my notes\n- {name: W}\n"})
+    seen: list[str] = []
+    fix_tree(root, warn=seen.append)
+    assert seen == ["modules.yaml: YAML comments are dropped when rewriting to canonical form"]

@@ -10,7 +10,7 @@ from __future__ import annotations
 import re
 import shutil
 import tempfile
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -26,7 +26,7 @@ from canvas_sync.errors import CanvasSyncError, ValidationError
 from canvas_sync.model.announcement import Announcement
 from canvas_sync.model.assignment import Assignment
 from canvas_sync.model.base import CanvasObject, Kind, ObjectKey
-from canvas_sync.model.course import _load_roster, dump_tree, load_tree  # pyright: ignore[reportPrivateUsage]
+from canvas_sync.model.course import dump_tree, load_roster, load_tree
 from canvas_sync.model.files import FILE_SPEC, FilesMeta
 from canvas_sync.model.modules import Module
 from canvas_sync.model.overrides import Override
@@ -37,7 +37,11 @@ from canvas_sync.render.md2html import md_to_html_report
 
 CACHE_PATH = ".canvas/roster-cache.json"
 _BODY_FOLDERS = (Kind.PAGE, Kind.ASSIGNMENT, Kind.ANNOUNCEMENT)
-_CONFLICT = re.compile(r"^(<{7}|>{7})( |$)", re.MULTILINE)
+# A full marker sequence, in order; a lone `<<<<<<<` line (e.g. in a code block) is not one.
+_CONFLICT = re.compile(r"^<{7}( |$).*?^={7}$.*?^>{7}( |$)", re.MULTILINE | re.DOTALL)
+_YAML_COMMENT = re.compile(r"^\s*#", re.MULTILINE)
+_YAML_FILES = ("course.yaml", "roster.yaml", "modules.yaml", "files/_meta.yaml")
+_LOAD_ERRORS = (CanvasSyncError, OSError, UnicodeError)
 _PATHLIKE = re.compile(r"^[^\s:]+: ")
 
 
@@ -108,8 +112,8 @@ def _load_folder(
     if not mine:
         try:
             return spec.load(root, cfg)
-        except CanvasSyncError as whole:
-            failure: CanvasSyncError | None = whole
+        except _LOAD_ERRORS as whole:
+            failure: Exception | None = whole
     else:
         failure = None
     out: dict[str, CanvasObject] = {}
@@ -129,7 +133,7 @@ def _load_folder(
                 (Path(tmp) / rel).mkdir()
             try:
                 out.update(spec.load(Path(tmp), cfg))
-            except CanvasSyncError as e:
+            except _LOAD_ERRORS as e:
                 found = True
                 issues.append(_from_error(rel, e, root))
     if failure is not None and not found:
@@ -182,7 +186,7 @@ def _load_cache(root: Path, issues: list[Issue]) -> RosterCache | None:
         return None
     try:
         return RosterCache.from_json(p.read_text(encoding="utf-8"))
-    except (CanvasSyncError, OSError) as e:
+    except _LOAD_ERRORS as e:
         issues.append(Issue(CACHE_PATH, str(e), "warning"))
         return None
 
@@ -195,13 +199,14 @@ def validate_tree(root: Path, *, cache: RosterCache | None = None) -> list[Issue
     never writes. Callers fail on ``has_errors(issues)``.
     """
     issues: list[Issue] = []
-    try:
-        cfg = load_config(root)
-    except CanvasSyncError as e:
-        return [_from_error("course.yaml", e, root)]
-
     conflicted = set(find_conflicts(root))
     issues += [Issue(p, "unresolved git conflict markers") for p in sorted(conflicted)]
+    if "course.yaml" in conflicted:
+        return issues  # nothing else can be loaded without the config
+    try:
+        cfg = load_config(root)
+    except _LOAD_ERRORS as e:
+        return [*issues, _from_error("course.yaml", e, root)]
 
     objs: dict[ObjectKey, CanvasObject] = {}
     for kind in _BODY_FOLDERS:
@@ -211,15 +216,15 @@ def validate_tree(root: Path, *, cache: RosterCache | None = None) -> list[Issue
     roster = Roster()
     if "roster.yaml" not in conflicted:
         try:
-            roster = _load_roster(root)
-        except CanvasSyncError as e:
+            roster = load_roster(root)
+        except _LOAD_ERRORS as e:
             issues.append(_from_error("roster.yaml", e, root))
 
     meta = FilesMeta()
     if "files/_meta.yaml" not in conflicted:
         try:
             meta = FILE_SPEC.load_files_meta(root, cfg)
-        except CanvasSyncError as e:
+        except _LOAD_ERRORS as e:
             issues.append(_from_error("files/_meta.yaml", e, root))
 
     modules: list[Module] = []
@@ -227,7 +232,7 @@ def validate_tree(root: Path, *, cache: RosterCache | None = None) -> list[Issue
         try:
             loaded_mods = model.REGISTRY[Kind.MODULE].load(root, cfg)
             modules = [cast(Module, m) for m in loaded_mods.values()]
-        except CanvasSyncError as e:
+        except _LOAD_ERRORS as e:
             issues.append(_from_error("modules.yaml", e, root))
 
     if cache is None:
@@ -278,22 +283,33 @@ def validate_tree(root: Path, *, cache: RosterCache | None = None) -> list[Issue
     return issues
 
 
-def fix_tree(root: Path) -> list[str]:
+def fix_tree(root: Path, *, warn: Callable[[str], None] | None = None) -> list[str]:
     """Rewrite files into canonical form; returns the tree paths written.
 
     Raises ``ValidationError`` (writing nothing) when a file has conflict markers
     or does not load. Only writes files whose bytes differ; never deletes, and
-    never touches blobs or ``.canvas/``. Idempotent.
+    never touches blobs or ``.canvas/``. Idempotent. ``warn`` gets a one-line message
+    for each YAML file about to lose ``#`` comments.
     """
     conflicts = find_conflicts(root)
     if conflicts:
         raise ValidationError(f"{conflicts[0]}: unresolved git conflict markers")
-    canonical = dump_tree(load_tree(root))
+    try:
+        canonical = dump_tree(load_tree(root))
+    except (OSError, UnicodeError) as e:
+        raise ValidationError(f"cannot read tree: {e}") from None
     written: list[str] = []
     for rel, data in canonical.items():
         path = root / rel
         if path.is_file() and path.read_bytes() == data:
             continue
+        if (
+            warn is not None
+            and rel in _YAML_FILES
+            and path.is_file()
+            and _YAML_COMMENT.search(path.read_text(encoding="utf-8"))
+        ):
+            warn(f"{rel}: YAML comments are dropped when rewriting to canonical form")
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(data)
         written.append(rel)
@@ -312,9 +328,9 @@ def validate(
 
     if fix:
         try:
-            for rel in fix_tree(root):
+            for rel in fix_tree(root, warn=lambda m: show(f"warning: {m}", "yellow")):
                 show(f"{rel}: rewritten in canonical form", "green")
-        except CanvasSyncError as e:
+        except _LOAD_ERRORS as e:
             show(f"fix skipped: {_from_error('course.yaml', e, root)}", "red")
     issues = validate_tree(root)
     for i in issues:
