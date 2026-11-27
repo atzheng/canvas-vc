@@ -103,7 +103,7 @@ def test_inactive_students_excluded(fake: FakeCanvas) -> None:
 
 def test_duplicate_refs_rejected(fake: FakeCanvas) -> None:
     fake.add_user("Twin Example", login_id="aexample")
-    with pytest.raises(ValidationError, match="share the ref"):
+    with pytest.raises(ValidationError, match="share the same student ref"):
         reader.read(fake.client(), make_ctx())
 
 

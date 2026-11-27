@@ -126,7 +126,9 @@ def _unambiguous_groups(rows: list[dict[str, Any]]) -> dict[str, int]:
         ids.setdefault(str(row["name"]), []).append(int(row["id"]))
     for name, found in ids.items():
         if len(found) > 1:
-            _warn(f"group {name!r} exists in several categories; set groups_category in roster.yaml")
+            _warn(
+                f"group {name!r} exists in several categories; set groups_category in roster.yaml"
+            )
     return {name: found[0] for name, found in ids.items() if len(found) == 1}
 
 
