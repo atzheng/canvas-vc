@@ -18,6 +18,8 @@ escape or reflow them.
 from __future__ import annotations
 
 import re
+import warnings
+from functools import lru_cache
 from html import escape, unescape
 from urllib.parse import unquote
 
@@ -28,6 +30,22 @@ from canvas_sync.render.links import LinkContext, from_canvas_url
 PANDOC_FROM = "html"
 PANDOC_TO = "gfm"
 PANDOC_ARGS = ("--wrap=none", "--eol=lf")
+PANDOC_VERSION = "3.5"  # major.minor the output was tested with (CONTRACTS.md section 6)
+
+
+@lru_cache(maxsize=1)
+def check_pandoc_version() -> str | None:
+    """Warn (once) if the installed pandoc's major.minor differs from PANDOC_VERSION."""
+    found = str(pypandoc.get_pandoc_version())  # pyright: ignore[reportUnknownMemberType]
+    if ".".join(found.split(".")[:2]) != PANDOC_VERSION:
+        msg = (
+            f"pandoc {found} found, but html->markdown output is only pinned for "
+            f"{PANDOC_VERSION}.x; bodies may convert differently (spurious diffs)"
+        )
+        warnings.warn(msg, RuntimeWarning, stacklevel=3)
+        return msg
+    return None
+
 
 _RAW_TAGS = "iframe|video|audio|object|embed|svg|script|style"
 _RAW_RE = re.compile(rf"<({_RAW_TAGS})\b[^>]*>.*?</\1\s*>", re.IGNORECASE | re.DOTALL)
@@ -45,7 +63,10 @@ _HIGHLIGHT_RE = re.compile(
 )
 # empty spacer paragraphs the Rich Content Editor leaves around (<p>&nbsp;</p>)
 _EMPTY_P_RE = re.compile(r"<p\b[^>]*>(?:\s|&nbsp;|\u00a0)*</p>", re.IGNORECASE)
-_LANG_CLASS_RE = re.compile(r"(<(?:pre|code)\b[^>]*\bclass=[\"'][^\"']*?)\blanguage-", re.I)
+_PRE_RE = re.compile(r"<pre\b[^>]*>(.*?)</pre\s*>", re.IGNORECASE | re.DOTALL)
+_BR_RUN_RE = re.compile(r"(?:<br\s*/?>\s*){2,}", re.IGNORECASE)
+# "&name;" / "&#123;" written literally: must stay literal, not become an entity
+_ENTITY_TEXT_RE = re.compile(r"(?<!\\)(`+)(?!`).*?(?<!`)\1(?!`)|<[^>\n]*>|&(?=#?\w+;)", re.DOTALL)
 _ANY_TAG_RE = re.compile(r"<[^>]*>")
 _TAG_RE = re.compile(r"<(a|img)\b[^>]*>", re.IGNORECASE)
 _ATTR_RE = re.compile(r"""\b(href|src)=(["'])(.*?)\2""", re.IGNORECASE | re.DOTALL)
@@ -102,9 +123,28 @@ def _protect_nbsp(md: str) -> str:
     return "\n".join(out)
 
 
-def _plain_code(m: re.Match[str]) -> str:
-    text = unescape(_ANY_TAG_RE.sub("", m.group(1)))
-    return f"<pre><code>{escape(text, quote=False)}</code></pre>"
+def _code_text(m: re.Match[str]) -> str:
+    return unescape(_ANY_TAG_RE.sub("", m.group(1))).removesuffix("\n")
+
+
+def _fence(code: str, prefix: str) -> str:
+    """Fenced block (no language: pygments output carries none, so it must not be kept)."""
+    ticks = "`" * max([3, *(len(r) + 1 for r in re.findall(r"`+", code))])
+    cont = re.sub(r"[^>\s]", " ", prefix)  # continuation lines of a list item / quote
+    lines = [ticks, *code.split("\n"), ticks]
+    return "\n".join(prefix + ln if i == 0 else (cont + ln).rstrip() for i, ln in enumerate(lines))
+
+
+def _escape_entities(md: str) -> str:
+    out: list[str] = []
+    in_fence = False
+    for line in md.split("\n"):
+        if line.lstrip().startswith(("```", "~~~")):
+            in_fence = not in_fence
+        elif not in_fence:
+            line = _ENTITY_TEXT_RE.sub(lambda m: "\\&" if m.group(0) == "&" else m.group(0), line)
+        out.append(line)
+    return "\n".join(out)
 
 
 def _display(latex: str) -> str:
@@ -117,6 +157,7 @@ def html_to_md(html: str, link_ctx: LinkContext) -> str:
         prefix += "X"
     latexes: list[str] = []
     raws: list[str] = []
+    codes: list[str] = []
 
     def eq_block(m: re.Match[str]) -> str:
         latexes.append(equation_latex(m.group(2)))
@@ -137,17 +178,28 @@ def html_to_md(html: str, link_ctx: LinkContext) -> str:
     tok = rf"{prefix}R\d+Z"
     work = re.sub(rf"<p\b[^>]*>\s*({tok})\s*</p>", r"<p>\1</p>", work)
     work = re.sub(rf"(?m)^[ \t]*({tok})[ \t]*$", r"<p>\1</p>", work)
-    work = _HIGHLIGHT_RE.sub(_plain_code, work)
+    work = _HIGHLIGHT_RE.sub(lambda m: f"<pre>{m.group(1)}</pre>", work)
+
+    def code(m: re.Match[str]) -> str:
+        codes.append(_code_text(m))
+        return f"<p>{prefix}C{len(codes) - 1}Z</p>"
+
+    work = _PRE_RE.sub(code, work)
     work = _EMPTY_P_RE.sub("", work)
-    work = _LANG_CLASS_RE.sub(r"\1", work)
+    work = _BR_RUN_RE.sub("</p><p>", work)
     work = _rewrite_links(work, link_ctx)
     work = _EQ_BLOCK_RE.sub(eq_block, work)
     work = _EQ_IMG_RE.sub(eq_inline, work)
 
+    check_pandoc_version()
     out: str = pypandoc.convert_text(  # pyright: ignore[reportUnknownMemberType]
         work, PANDOC_TO, format=PANDOC_FROM, extra_args=list(PANDOC_ARGS)
     )
 
+    out = _escape_entities(out)
+    out = re.sub(
+        rf"(?m)^(.*?){prefix}C(\d+)Z$", lambda m: _fence(codes[int(m.group(2))], m.group(1)), out
+    )
     out = re.sub(rf"{prefix}D(\d+)Z", lambda m: _display(latexes[int(m.group(1))]), out)
     out = re.sub(rf"{prefix}I(\d+)Z", lambda m: f"${latexes[int(m.group(1))]}$", out)
     out = re.sub(rf"{prefix}R(\d+)Z", lambda m: raws[int(m.group(1))], out)

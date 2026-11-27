@@ -139,6 +139,6 @@ def from_canvas_url(url: str, ctx: LinkContext) -> str | None:
     rel = posixpath.relpath(tree, base)
     frag = f"#{parts.fragment}" if parts.fragment else ""
     query = parts.query
-    if kind is Kind.FILE and not extra:
+    if kind is Kind.FILE and extra != ["preview"]:
         query = "&".join(q for q in query.split("&") if q and q != "wrap=1")
     return quote(rel, safe="/._-~") + (f"?{query}" if query else "") + frag

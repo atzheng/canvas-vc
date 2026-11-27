@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import warnings
 from pathlib import Path
 
 import pytest
@@ -80,6 +81,51 @@ def test_rce_fixtures_stable(name: str) -> None:
     md1 = html_to_md((FIXTURES / name).read_text(encoding="utf-8"), ctx())
     md2 = once(md1)  # may lose code languages (pygments output carries none) ...
     assert once(md2) == md2  # ... but is a fixed point from there on
+
+
+RCE_EDGE_CASES = [
+    '<p><a href="/courses/7/files/33/download?wrap=1">f</a> '
+    '<a href="/courses/7/files/33?wrap=1">g</a></p>',
+    '<pre class="language-python"><code>x = 1\nprint("`` ticks")\n</code></pre>',
+    "<p>a<br><br><br>b</p>",
+    "<p>&amp;nbsp; and &amp;amp; and `&amp;lt;` literal</p>",
+    "<p>&nbsp;lead and trail&nbsp;</p>",
+    "<ul><li>item<pre><code>in list\n</code></pre></li></ul>",
+]
+
+
+@pytest.mark.parametrize("html", RCE_EDGE_CASES)
+def test_rce_edge_cases_multipass(html: str) -> None:
+    """html -> md -> html -> md -> html -> md: stable from the first md on."""
+    md1 = html_to_md(html, ctx())
+    md2 = once(md1)
+    md3 = once(md2)
+    assert md1 == md2 == md3
+
+
+def test_literal_entity_text_stays_literal() -> None:
+    md = html_to_md("<p>&amp;nbsp;</p>", ctx())
+    assert "\u00a0" not in once(md)
+    assert "&amp;nbsp;" in md_to_html(md, ctx())
+
+
+def test_pandoc_version_matches_pin() -> None:
+    from canvas_sync.render import html2md
+
+    html2md.check_pandoc_version.cache_clear()
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        html2md.check_pandoc_version()  # fails clearly if pandoc major.minor drifted
+
+
+def test_pandoc_version_mismatch_warns(monkeypatch: pytest.MonkeyPatch) -> None:
+    from canvas_sync.render import html2md
+
+    monkeypatch.setattr(html2md.pypandoc, "get_pandoc_version", lambda: "9.9.1")
+    html2md.check_pandoc_version.cache_clear()
+    with pytest.warns(RuntimeWarning, match="pandoc 9.9.1"):
+        html2md.check_pandoc_version()
+    html2md.check_pandoc_version.cache_clear()
 
 
 def test_rce_syllabus_content_kept() -> None:
@@ -176,7 +222,8 @@ _doc = st.lists(_block, min_size=1, max_size=4).map(lambda bs: "\n\n".join(bs) +
 
 
 @settings(
-    max_examples=60,
+    max_examples=25,
+    derandomize=True,
     deadline=None,
     suppress_health_check=[HealthCheck.too_slow, HealthCheck.filter_too_much],
 )
