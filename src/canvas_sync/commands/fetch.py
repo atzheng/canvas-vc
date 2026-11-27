@@ -50,6 +50,13 @@ def _changed(previous: Course | None, course: Course) -> int:
     return sum(1 for p in new.keys() | old.keys() if old.get(p) != new.get(p))
 
 
+def committed_ignore(root: Path, commit: str) -> IgnoreRules:
+    """``.canvasignore`` as committed at ``commit`` (no rules when absent)."""
+    raw = gitops.read_file_at(root, commit, IGNORE_FILE)
+    lines = raw.decode("utf-8-sig", errors="replace").splitlines() if raw else []
+    return IgnoreRules(root, lines)
+
+
 def committed_inputs(root: Path, config: CourseConfig) -> tuple[CourseConfig, IgnoreRules]:
     """course.yaml and .canvasignore as committed at HEAD, so uncommitted edits cannot leak
     into canvas/main. Without HEAD (clone) or when HEAD lacks or cannot parse them, the
@@ -64,9 +71,7 @@ def committed_inputs(root: Path, config: CourseConfig) -> tuple[CourseConfig, Ig
             config = CourseConfig.model_validate(parsed)
         except (UnicodeDecodeError, ValidationError, PydanticValidationError):
             pass
-    ignore_raw = gitops.read_file_at(root, head, IGNORE_FILE)
-    lines = ignore_raw.decode("utf-8-sig", errors="replace").splitlines() if ignore_raw else []
-    return config, IgnoreRules(root, lines)
+    return config, committed_ignore(root, head)
 
 
 def run_fetch(root: Path, client: CanvasClient, config: CourseConfig) -> FetchResult:

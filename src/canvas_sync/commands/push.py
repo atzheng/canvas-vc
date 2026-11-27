@@ -30,6 +30,7 @@ from rich.console import Console
 
 from canvas_sync import gitops
 from canvas_sync.apply import ApplyResult, apply, needs_guard
+from canvas_sync.commands.diff import build_plan
 from canvas_sync.commands.fetch import bodies_at, committed_inputs
 from canvas_sync.commands.validate import find_conflicts, has_errors, validate_tree
 from canvas_sync.config import CourseConfig, get_token, load_config
@@ -42,12 +43,11 @@ from canvas_sync.errors import (
     UnresolvedConflicts,
     ValidationError,
 )
-from canvas_sync.ignore import IgnoreRules
 from canvas_sync.model.base import CanvasObject, Kind, ObjectKey
 from canvas_sync.model.course import Course, dump_tree
 from canvas_sync.model.modules import Module, ModuleItem
 from canvas_sync.model.roster import RosterCache
-from canvas_sync.plan.core import Action, Operation, Plan, diff, unconfirmed_risks
+from canvas_sync.plan.core import Action, Operation, Plan, unconfirmed_risks
 from canvas_sync.plan.modules import PlacedItem, module_keys
 from canvas_sync.remote import roster
 from canvas_sync.remote.backup import backup
@@ -84,13 +84,6 @@ class PushResult:
 
 
 # ---- trees ------------------------------------------------------------------------------
-
-
-def _without_ignored(course: Course, ignore: IgnoreRules) -> Course:
-    objs = {k: v for k, v in course.objects.items() if not ignore.ignored(k.path)}
-    files = {p: e for p, e in course.files_meta.files.items() if not ignore.ignored(p)}
-    meta = course.files_meta.model_copy(update={"files": files})
-    return dataclasses.replace(course, objects=objs, files_meta=meta)
 
 
 def _with_ids(course: Course, ids: dict[ObjectKey, int | str]) -> Course:
@@ -376,17 +369,6 @@ def _move_bodies(bodies: Bodies, base: Course, target: Course) -> None:
 # ---- the push ---------------------------------------------------------------------------
 
 
-def _build_plan(
-    root: Path, head: str, main: str, ignore: IgnoreRules
-) -> tuple[Plan, Course, Course]:
-    """canvas/main tree vs HEAD tree, ``.canvasignore`` applied to both before diffing (an
-    ignored file absent from HEAD must not plan a DELETE); a parse error in either tree
-    aborts. Kept in one place so it can be swapped for ``commands.diff.build_plan``."""
-    base = _without_ignored(gitops.load_course_at(root, main), ignore)
-    target = _without_ignored(gitops.load_course_at(root, head), ignore)
-    return diff(base, target), base, target
-
-
 def _count(plan: Plan) -> str:
     n = len(plan.ops)
     return f"{n} change" + ("" if n == 1 else "s")
@@ -463,7 +445,7 @@ def run_push(
     check_validation(root, out)
 
     config, ignore = committed_inputs(root, config)
-    plan, base, target = _build_plan(root, head, main, ignore)
+    plan, base, target = build_plan(root, ignore, head=head, main=main)
     skipped: list[Operation] = []
     if no_delete:
         skipped = [o for o in plan.ops if o.action is Action.DELETE]
