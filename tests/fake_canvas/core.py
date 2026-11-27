@@ -644,10 +644,15 @@ class FakeCanvas(httpx.BaseTransport):
 
     def _list_users(self, q: Req) -> list[dict[str, Any]]:
         wanted = {_ENROLLMENT_TYPES.get(t.lower(), t) for t in q.values("enrollment_type")}
+        states = set(q.values("enrollment_state"))
         out: list[dict[str, Any]] = []
         for user in self.users.values():
             mine = [e for e in self.enrollments.values() if e["user_id"] == user["id"]]
-            if wanted and not any(e["type"] in wanted for e in mine):
+            if not any(
+                (not wanted or e["type"] in wanted)
+                and (not states or e["enrollment_state"] in states)
+                for e in mine
+            ):
                 continue
             row = dict(user)
             if "enrollments" in q.values("include"):
