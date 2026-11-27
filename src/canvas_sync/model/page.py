@@ -13,11 +13,22 @@ from canvas_sync.errors import ValidationError
 from canvas_sync.model.base import CanvasObject, Kind
 from canvas_sync.model.serialize import dump_frontmatter, load_frontmatter
 
-KEY_ORDER = ["canvas_id", "title", "published", "publish_at", "front_page", "body_format"]
+KEY_ORDER = [
+    "canvas_id",
+    "page_id",
+    "title",
+    "published",
+    "publish_at",
+    "front_page",
+    "body_format",
+]
 
 
 class Page(CanvasObject):
     # canvas_id is the page URL slug (str); None for a page not yet on Canvas.
+    # page_id is Canvas's stable numeric id (the slug changes on rename and can be reused by
+    # another page); None until the first fetch that sees the page.
+    page_id: int | None = None
     title: str = ""
     published: bool | None = None  # None: no value, the consumer applies course defaults
     publish_at: LocalDT | None = None

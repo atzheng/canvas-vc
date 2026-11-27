@@ -25,7 +25,7 @@ from canvas_sync.remote.context import ApplyContext
 from canvas_sync.remote.guard import SubmissionGuard
 from tests.fake_canvas.core import FakeCanvas
 from tests.fake_canvas.discussion_topics import add_announcement
-from tests.fake_canvas.pages import add_page
+from tests.fake_canvas.pages import add_page, rename_page
 from tests.test_pages_announcements_reader import ctx_for, make_cfg
 
 CFG = make_cfg()
@@ -150,7 +150,13 @@ def test_page_push_then_fetch_has_no_diff(tmp_path: Path) -> None:
     tree = with_ids(target, res)
     fctx = ctx_for(tmp_path, {k.path: o for k, o in tree.objects.items()}, ctx.bodies)
     got = remote_pages.read(fake.client("read"), fctx)
-    assert got == {k.path: o for k, o in tree.objects.items()}
+    # apply reports only canvas_id; the first fetch adds the stable page_id (one-time)
+    assert all(isinstance(p, Page) and p.page_id is not None for p in got.values())
+    expected = {
+        k.path: o.model_copy(update={"page_id": got[k.path].page_id})  # type: ignore[attr-defined]
+        for k, o in tree.objects.items()
+    }
+    assert got == expected
     assert diff(tree, course(got), differs()).is_empty()
 
 
@@ -197,7 +203,9 @@ def test_page_rename_reports_new_slug(tmp_path: Path) -> None:
     got = remote_pages.read(
         fake.client("read"), ctx_for(tmp_path, {k.path: o for k, o in base.objects.items()})
     )
-    assert got == {"pages/p.md": tree.objects[key]}
+    page_id = got["pages/p.md"].page_id  # type: ignore[attr-defined]  # added by the fetch
+    assert page_id is not None
+    assert got == {"pages/p.md": tree.objects[key].model_copy(update={"page_id": page_id})}
 
 
 def test_page_clearing_publish_at_sends_null() -> None:
@@ -410,3 +418,29 @@ def test_deleting_the_front_page_without_replacement_is_refused() -> None:
         diff(base, course({}), differs())
     other = course({"pages/o.md": Page(canvas_id="o", title="O", front_page=True)})
     assert ops_of(diff(base, other, differs()))[-1] == (Action.DELETE, "pages/h.md")
+
+
+def test_page_differ_pairs_by_page_id_not_reused_slug() -> None:
+    base = course({"pages/intro.md": Page(canvas_id="intro", page_id=1, title="Intro")})
+    target = course(
+        {
+            "pages/intro.md": Page(canvas_id="welcome", page_id=1, title="Intro"),
+            "pages/new.md": Page(canvas_id="intro", page_id=2, title="Intro"),
+        }
+    )
+    # same slug, different page_id: not paired; the renamed slug alone is no change
+    assert ops_of(diff(base, target, differs())) == [(Action.CREATE, "pages/new.md")]
+
+
+def test_page_write_refused_when_slug_belongs_to_another_page() -> None:
+    fake = FakeCanvas()
+    a = add_page(fake, "Intro", "<p>a</p>")
+    rename_page(fake, a["page_id"], "Welcome")
+    add_page(fake, "Intro", "<p>b</p>")
+    base = course({"pages/intro.md": Page(canvas_id="intro", page_id=a["page_id"], title="Intro")})
+    target = course(
+        {"pages/intro.md": Page(canvas_id="intro", page_id=a["page_id"], title="Intro", body="z")}
+    )
+    plan = diff(base, target, differs())
+    res = apply(plan, fake.client("write"), apply_ctx(fake), confirmed=set())
+    assert res.error is not None and "another page" in str(res.error)
