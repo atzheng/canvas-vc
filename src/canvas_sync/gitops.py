@@ -283,6 +283,16 @@ def load_course_at(root: Path, commit: str) -> Course:
         return load_tree(base)
 
 
+def merge_with_output(root: Path, ref: str = REMOTE_REF, rebase: bool = False) -> tuple[int, str]:
+    """:func:`merge`, also returning git's message: the first non-empty stderr line, else the
+    last stdout line, else ``""`` (for a one-line report)."""
+    args = ["rebase", ref] if rebase else ["merge", "--no-edit", "--allow-unrelated-histories", ref]
+    proc = _run(root, args, ok=tuple(range(256)))
+    err = [ln.strip() for ln in proc.stderr.decode(errors="replace").splitlines() if ln.strip()]
+    out = [ln.strip() for ln in proc.stdout.decode(errors="replace").splitlines() if ln.strip()]
+    return proc.returncode, (err[0] if err else out[-1] if out else "")
+
+
 def merge(root: Path, ref: str = REMOTE_REF, rebase: bool = False) -> int:
     """Run ``git merge`` (or ``rebase``) of ``ref`` in the work tree; returns the exit code.
 
@@ -293,8 +303,7 @@ def merge(root: Path, ref: str = REMOTE_REF, rebase: bool = False) -> int:
     Unrelated histories are allowed for merge: the first fetch creates a root commit
     on canvas/main.
     """
-    args = ["rebase", ref] if rebase else ["merge", "--no-edit", "--allow-unrelated-histories", ref]
-    return _run(root, args, ok=tuple(range(256))).returncode
+    return merge_with_output(root, ref, rebase)[0]
 
 
 def fast_forward(root: Path, ref: str = REMOTE_REF) -> bool:
@@ -302,3 +311,48 @@ def fast_forward(root: Path, ref: str = REMOTE_REF) -> bool:
     if ref_commit(root, ref) is None:
         return False
     return _run(root, ["merge", "--ff-only", ref], ok=(0, 1, 128)).returncode == 0
+
+
+def ahead_behind(root: Path, ref: str = REMOTE_REF) -> tuple[int, int]:
+    """(commits in HEAD not in ``ref``, commits in ``ref`` not in HEAD); (0, 0) if either
+    is missing."""
+    if head_commit(root) is None or ref_commit(root, ref) is None:
+        return 0, 0
+    a, b = _out(root, ["rev-list", "--left-right", "--count", f"HEAD...{ref}"]).split()
+    return int(a), int(b)
+
+
+def changed_paths(root: Path) -> list[str]:
+    """Tracked files with staged or unstaged changes (untracked files are not counted)."""
+    out = _run(root, ["status", "--porcelain", "-z", "--untracked-files=no"]).stdout.decode()
+    recs = out.split("\0")
+    paths: list[str] = []
+    i = 0
+    while i < len(recs):
+        rec = recs[i]
+        i += 1
+        if len(rec) > 3:
+            paths.append(rec[3:])
+            if rec[0] in "RC":  # a rename/copy record is followed by its source path
+                i += 1
+    return sorted(paths)
+
+
+FETCH_TIME_FILE = "canvas-last-fetch"
+
+
+def record_fetch_time(root: Path, when: str) -> None:
+    """Remember (ISO 8601 UTC text) when the last fetch started; local cache only."""
+    (git_common_dir(root) / FETCH_TIME_FILE).write_text(when + "\n", encoding="utf-8")
+
+
+def last_fetch_time(root: Path) -> str | None:
+    """The recorded start of the last fetch, else the commit time of canvas/main, else None."""
+    try:
+        text = (git_common_dir(root) / FETCH_TIME_FILE).read_text(encoding="utf-8").strip()
+    except OSError:
+        text = ""
+    if text:
+        return text
+    commit = ref_commit(root)
+    return _out(root, ["log", "-1", "--format=%cI", commit]) if commit else None
