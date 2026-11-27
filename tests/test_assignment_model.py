@@ -215,10 +215,25 @@ def test_check_override_targets() -> None:
     assert check_override_targets([*ok, Override(students=["amy"])], roster, cache, "a.md") == []
     bad = [Override(section="X"), Override(group="Y"), Override(students=["amy", "who"])]
     assert check_override_targets(bad, roster, cache, "assignments/a.md") == [
-        "assignments/a.md: unknown section 'X'",
-        "assignments/a.md: unknown group 'Y'",
-        "assignments/a.md: unknown student 'who'",
+        ("assignments/a.md: unknown section 'X'", "error"),
+        ("assignments/a.md: unknown group 'Y'", "error"),
+        ("assignments/a.md: unknown student 'who'", "error"),
     ]
+
+
+def test_check_override_targets_unknown_refs() -> None:
+    roster, cache = Roster(), RosterCache(students={"amy": 1})
+    good = [
+        Override(students=["amy", "unknown:42"]),
+        Override(section="unknown:7"),
+        Override(group="unknown:9"),
+    ]
+    out = check_override_targets(good, roster, cache, "a.md")
+    assert [p.severity for p in out] == ["warning"] * 3
+    assert "a.md: section 'unknown:7' is not in the roster cache" in [p.message for p in out]
+    for bad in ("unknown:", "unknown:0", "unknown:-3", "unknown:abc", "unknown:1.5", "unknown:٣"):
+        (p,) = check_override_targets([Override(students=[bad])], roster, cache, "a.md")
+        assert p.severity == "error" and "malformed student ref" in p.message
 
 
 def test_student_in_two_sets_rejected() -> None:
