@@ -32,6 +32,13 @@ class RosterCache(BaseModel):
     sections: dict[str, int] = {}  # name -> id
     groups: dict[str, int] = {}  # name -> id
 
+    def ref_for(self, user_id: int) -> str | None:
+        """The student ref for a Canvas user id, or None if that user is not in the cache."""
+        for ref, uid in self.students.items():
+            if uid == user_id:
+                return ref
+        return None
+
     def to_json(self) -> str:
         """Deterministic JSON (sorted keys, trailing newline)."""
         return json.dumps(self.model_dump(), indent=2, sort_keys=True) + "\n"

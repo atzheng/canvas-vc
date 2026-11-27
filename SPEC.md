@@ -429,6 +429,12 @@ The order of entries is the order on Canvas. Moving a block of lines in YAML
 is a move on Canvas, and git merges reorders reasonably as long as both sides
 didn't move the same item.
 
+Module item types canvas-sync does not support (for example external tools)
+and module settings (prerequisites, sequential progress, completion
+requirements) are preserved in `modules.yaml` but are read-only in v1: fetch
+keeps them, push never changes or deletes them, and a local edit to them is
+ignored with a warning.
+
 ## Replacing files without breaking links
 
 **Question:** can a file be replaced without its ID/URL changing?
