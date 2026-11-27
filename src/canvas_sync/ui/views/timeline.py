@@ -74,7 +74,13 @@ def _override_events(
             if not isinstance(v, datetime):
                 continue
             flags = [p.message for p in problems if label in p.fields]
-            if label == "due" and isinstance(base_lock, datetime) and v > base_lock:
+            # An override with its own lock is already checked against it by date_problems.
+            if (
+                label == "due"
+                and o.lock is None
+                and isinstance(base_lock, datetime)
+                and v > base_lock
+            ):
                 flags.append("override due is after the base lock")
             out.append(Event(v, label, kind, path, title, _target(o), tuple(flags)))
     return out

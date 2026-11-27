@@ -164,3 +164,14 @@ def test_page_renders_weeks_flags_links_and_filter(tmp_path: Path) -> None:
 def test_empty_course(tmp_path: Path) -> None:
     html = dispatch(make_repo(tmp_path, {"course.yaml": COURSE_YAML}), "/timeline").body.decode()
     assert "No dated events" in html
+
+
+def test_override_with_own_lock_not_flagged_against_base_lock() -> None:
+    a = Assignment(
+        title="HW1",
+        due=dt("2026-10-02 23:59"),
+        lock=dt("2026-10-04 23:59"),
+        overrides=[Override(section="B", due=dt("2026-10-08 12:00"), lock=dt("2026-10-10 12:00"))],
+    )
+    tl = extract(course({ObjectKey(Kind.ASSIGNMENT, "assignments/hw1.md"): a}))
+    assert all(not e.flags for e in tl.events)
