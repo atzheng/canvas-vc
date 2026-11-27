@@ -148,7 +148,7 @@ class ObjectKey:
 
 class CanvasObject(BaseModel):          # frozen pydantic model
     model_config = ConfigDict(frozen=True, extra="forbid")
-    canvas_id: int | str | None = None  # pages use their URL slug (str)
+    canvas_id: int | str | None = None  # pages use their URL slug (str); Page also has page_id: int | None
     def key(self, path: str) -> ObjectKey: ...
 
 class TypeSpec(Protocol):               # one per type, registered in model/__init__.py
@@ -309,7 +309,8 @@ in 80 columns, otherwise one item per line; the file ends with exactly one
 whitespace is stripped from the body.
 
 Key order for each type is a module-level `KEY_ORDER` constant in that type's
-model file, starting with `canvas_id`, then `title`/`name`.
+model file, starting with `canvas_id`, then `title`/`name`. Page is the exception: its order is
+`canvas_id, page_id, title, ...` (`page_id` is Canvas's stable numeric id, written once known).
 
 ## 6. Rendering and links
 
@@ -553,14 +554,17 @@ def assign_paths(client, ctx) -> dict[int, str]   # announcements and assignment
   alone. When `None`, they resolve through `ctx.previous` plus the objects of the kind
   being read; previous objects of that kind that no longer exist remotely are dropped.
 - `read` returns objects keyed by tree path (it must choose paths to give `html_to_md` a
-  link context). `Page.canvas_id` is the current Canvas url slug; there is no `page_id`.
+  link context). `Page.canvas_id` is the current Canvas url slug (module items and links use it);
+  `Page.page_id` is the stable numeric id (tracked frontmatter key right after `canvas_id`,
+  optional on load, so files without it round-trip unchanged until a fetch adds it).
 - Path assignment: objects in `ctx.previous` keep their path, matched by `canvas_id`.
-  Pages whose slug is gone are matched through Canvas's old-slug redirect and `page_id`.
+  Pages are matched by `page_id` first; a previous page with a `page_id` never matches by
+  slug (the slug may now belong to another page), so a page whose `page_id` is gone from
+  Canvas is simply absent. Previous pages without `page_id` (files from before it existed)
+  match by slug, else through Canvas's old-slug redirect compared by `page_id`.
   New objects (ascending Canvas id) get `<folder>/<slugify(title)>.md`, then `-2`, `-3`
   on collision with already assigned paths (compared case-insensitively). Only
   matched objects see their previous body and `body_format`; new ones never do.
-- **Known limitation:** if page A is renamed and a new page B takes A's old slug, the
-  slug match pairs the previous A with B. Needs a stored `page_id` to detect.
 - `slugify(title)`: NFKD, drop non-ASCII, lowercase, runs of non-alphanumerics become `-`,
   strip `-`, first 80 characters, strip `-` again, `untitled` if empty (one rule for pages,
   assignments and announcements, all through `remote/paths.py`;
@@ -688,7 +692,7 @@ raised; the push CLI must report it as a stop, not a crash.
   predecessor up with a live GET of the module (or item) list. New modules are created
   unpublished and then published by a PUT; the new id is put in `ctx.ids` right after the POST. Page/assignment item titles are never sent. A local module delete never removes a module that still holds `unmanaged` items on Canvas: its managed items are deleted, the module stays, with a one-line warning. A hand-written `unmanaged` entry that carries a managed item's `canvas_id` is ignored (item kept) with a warning. The pages writer must return the str slug as its id (`_content_id` relies on it).
 
-**Pages and announcements writers** (`plan/pages.py`, `plan/announcements.py`; `remote/pages.py`, `remote/announcements.py`). Both differs pair by `canvas_id`, then by path for a target without one; a same-id file at a new path with no other change gives no operation. `after` is a `PlacedPage` / `PlacedAnnouncement` (the model plus `key_path`), which the writer uses to key `ctx.ids` and `ctx.bodies`. `published: None` on a page never produces a change; a page create uses `course.yaml` `defaults.published`. Writers send JSON (`{"wiki_page": {...}}`; topic fields at top level with `is_announcement: true`), only changed fields, null for a cleared date, and render Markdown with `md_to_html` using links resolved through `ctx.ids` (links to objects created later in the same push stay as written until push renders again). After each body write they call `ctx.bodies.record(key_path, md, html)` with the HTML in Canvas's response (`body` / `message`); `body_format: html` bodies are not recorded. **Page rename:** Canvas changes the slug when the title changes; `update` puts the new slug in `ctx.ids[key]` and `apply` reports any id that changed during an UPDATE in `ApplyResult.new_ids`, so push writes the new `canvas_id` back to the page file. Announcements: a deleted file is an UNPUBLISH (`POSTED_ANNOUNCEMENT` warning, no flag; nothing if already unpublished) and `delete()` itself only unpublishes; a create, or an update that makes it posted now, carries `NOTIFIES_STUDENTS` (`--confirm-notify`); editing an already-posted one carries the `POSTED_ANNOUNCEMENT` warning.
+**Pages and announcements writers** (`plan/pages.py`, `plan/announcements.py`; `remote/pages.py`, `remote/announcements.py`). Both differs pair by `canvas_id`, then by path for a target without one (pages: by `page_id` first when both sides have one, and never by slug when both have different `page_id`s; `page_id` is excluded from field changes); a same-id file at a new path with no other change gives no operation. `after` is a `PlacedPage` / `PlacedAnnouncement` (the model plus `key_path`), which the writer uses to key `ctx.ids` and `ctx.bodies`. `published: None` on a page never produces a change; a page create uses `course.yaml` `defaults.published`. Writers send JSON (`{"wiki_page": {...}}`; topic fields at top level with `is_announcement: true`), only changed fields, null for a cleared date, and render Markdown with `md_to_html` using links resolved through `ctx.ids` (links to objects created later in the same push stay as written until push renders again). After each body write they call `ctx.bodies.record(key_path, md, html)` with the HTML in Canvas's response (`body` / `message`); `body_format: html` bodies are not recorded. **Page rename:** Canvas changes the slug when the title changes; `update` puts the new slug in `ctx.ids[key]` and `apply` reports any id that changed during an UPDATE in `ApplyResult.new_ids`, so push writes the new `canvas_id` back to the page file. **Page identity:** before an UPDATE or DELETE of a page that has a `page_id`, the writer GETs its slug and refuses (`CanvasSyncError`, nothing sent) unless that page's `page_id` matches, so a reused slug is never written to. Pages without a `page_id` are addressed by slug unverified. `apply` reports only `canvas_id`, so a page created by push gets its `page_id` from the next fetch (one-time diff, like every file written before this field existed). Announcements: a deleted file is an UNPUBLISH (`POSTED_ANNOUNCEMENT` warning, no flag; nothing if already unpublished) and `delete()` itself only unpublishes; a create, or an update that makes it posted now, carries `NOTIFIES_STUDENTS` (`--confirm-notify`); editing an already-posted one carries the `POSTED_ANNOUNCEMENT` warning.
 
 ```python
 # errors.py
