@@ -15,9 +15,11 @@ from canvas_sync.model.base import CanvasObject
 from canvas_sync.model.course import Course, dump_tree, load_tree
 from canvas_sync.model.modules import (
     MODULE_SPEC,
+    CompletionRequirement,
     Module,
     ModuleItem,
     ModuleOverride,
+    UnmanagedItem,
     UnmanagedRef,
 )
 from tests.helpers.fixed_point import (
@@ -254,3 +256,83 @@ def test_awkward_strings_round_trip(tmp_path: Path, cfg: CourseConfig) -> None:
         )
     }
     assert_spec_fixed_point(MODULE_SPEC, objs, cfg, tmp_path)
+
+
+UNMANAGED_TEXT = """\
+- canvas_id: 10
+  name: Intro
+- canvas_id: 11
+  name: Week 1
+  prerequisites: [10]
+  require_sequential_progress: true
+  completion_requirements:
+    - item_id: 201
+      type: must_view
+    - item_id: 203
+      type: min_score
+      min_score: 80
+  items:
+    - canvas_id: 201
+      page: syllabus
+    - canvas_id: 202
+      unmanaged:
+        type: ExternalTool
+        content_id: 777
+        external_url: https://tool.example.org/launch
+      title: Lab tool
+      indent: 1
+    - canvas_id: 203
+      assignment: hw1
+"""
+
+
+def test_unmanaged_items_and_settings_round_trip(tmp_path: Path, cfg: CourseConfig) -> None:
+    objs = _load(tmp_path, UNMANAGED_TEXT)
+    m = list(objs.values())[1]
+    assert isinstance(m, Module)
+    assert m.prerequisites == [10]
+    assert m.require_sequential_progress is True
+    assert [r.item_id for r in m.completion_requirements] == [201, 203]
+    assert m.items[1].item_type == "unmanaged"
+    out = assert_spec_fixed_point(MODULE_SPEC, objs, cfg, tmp_path)
+    assert out["modules.yaml"].decode() == UNMANAGED_TEXT
+
+
+def test_unmanaged_item_validation() -> None:
+    with pytest.raises(PydanticValidationError, match="canvas_id"):
+        ModuleItem(unmanaged=UnmanagedItem(type="ExternalTool"))
+    with pytest.raises(PydanticValidationError):
+        ModuleItem(canvas_id=1, unmanaged=UnmanagedItem(type=" "))
+    with pytest.raises(PydanticValidationError):
+        ModuleItem(canvas_id=1, page="a", unmanaged=UnmanagedItem(type="X"))
+
+
+def test_module_settings_validation(tmp_path: Path) -> None:
+    with pytest.raises(PydanticValidationError, match="own prerequisite"):
+        Module(name="A", canvas_id=5, prerequisites=[5])
+    with pytest.raises(PydanticValidationError, match="duplicate prerequisite"):
+        Module(name="A", prerequisites=[1, 1])
+    with pytest.raises(PydanticValidationError, match="min_score"):
+        CompletionRequirement(item_id=1, type="must_view", min_score=3)
+    with pytest.raises(PydanticValidationError, match="duplicate completion"):
+        Module(
+            name="A",
+            completion_requirements=[
+                CompletionRequirement(item_id=1, type="must_view"),
+                CompletionRequirement(item_id=1, type="must_submit"),
+            ],
+        )
+    with pytest.raises(ValidationError, match=r"\[0\]\.prerequisites\[0\]"):
+        _load(tmp_path, "- name: A\n  prerequisites:\n    - not-an-id\n")
+    with pytest.raises(ValidationError, match="duplicate canvas_id 7"):
+        _load(
+            tmp_path,
+            "- name: A\n  items:\n    - canvas_id: 7\n      unmanaged:\n"
+            "        type: ExternalTool\n"
+            "    - canvas_id: 7\n      header: h\n",
+        )
+
+
+def test_null_settings_mean_default(tmp_path: Path, cfg: CourseConfig) -> None:
+    objs = _load(tmp_path, "- name: A\n  prerequisites:\n  completion_requirements:\n")
+    assert MODULE_SPEC.dump(objs, cfg)["modules.yaml"] == b"- name: A\n"

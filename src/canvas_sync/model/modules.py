@@ -29,7 +29,19 @@ from canvas_sync.model.overrides import Override, validate_overrides
 from canvas_sync.model.serialize import dump_yaml, load_yaml
 
 FILENAME = "modules.yaml"
-KEY_ORDER = ["canvas_id", "name", "published", "unlock", "overrides", "items"]
+KEY_ORDER = [
+    "canvas_id",
+    "name",
+    "published",
+    "unlock",
+    "prerequisites",
+    "require_sequential_progress",
+    "completion_requirements",
+    "overrides",
+    "items",
+]
+COMPLETION_KEY_ORDER = ["item_id", "type", "min_score"]
+UNMANAGED_KEY_ORDER = ["type", "content_id", "external_url"]
 OVERRIDE_KEY_ORDER = ["section", "group", "students", "unlock"]
 ITEM_KEY_ORDER = [
     "canvas_id",
@@ -40,14 +52,20 @@ ITEM_KEY_ORDER = [
     "url",
     "quiz",
     "discussion",
+    "unmanaged",
     "title",
     "indent",
     "new_tab",
     "published",
 ]
-NESTED_ORDERS = {"items": ITEM_KEY_ORDER, "overrides": OVERRIDE_KEY_ORDER}
+NESTED_ORDERS = {
+    "items": ITEM_KEY_ORDER,
+    "overrides": OVERRIDE_KEY_ORDER,
+    "completion_requirements": COMPLETION_KEY_ORDER,
+    "unmanaged": UNMANAGED_KEY_ORDER,
+}
 
-_ITEM_TYPES = ("page", "assignment", "file", "header", "url", "quiz", "discussion")
+_ITEM_TYPES = ("page", "assignment", "file", "header", "url", "quiz", "discussion", "unmanaged")
 _PATH_TYPES = ("page", "assignment", "file")
 
 
@@ -56,6 +74,50 @@ class UnmanagedRef(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
     canvas_id: StrictInt
+
+
+class UnmanagedItem(BaseModel):
+    """Module item of a Canvas type canvas-sync cannot manage (e.g. ExternalTool).
+
+    Kept in position so a fetch/push round trip never drops it. It is never
+    written to Canvas: the item's own ``canvas_id`` (required) is its identity.
+    ``type`` is Canvas's ``type`` string; ``content_id`` and ``external_url``
+    are carried only for information.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    type: str
+    content_id: StrictInt | None = None
+    external_url: str | None = None
+
+    @field_validator("type")
+    @classmethod
+    def _type_not_empty(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("unmanaged type must not be empty")
+        return v
+
+
+class CompletionRequirement(BaseModel):
+    """Module completion requirement, keyed by the module item's ``canvas_id``.
+
+    ``type`` is Canvas's requirement type (``must_view``, ``must_submit``,
+    ``must_contribute``, ``min_score``, ``must_mark_done``); ``min_score`` goes
+    with ``min_score`` only. Carried opaquely: never written to Canvas.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    item_id: StrictInt
+    type: str
+    min_score: float | None = None
+
+    @model_validator(mode="after")
+    def _check(self) -> CompletionRequirement:
+        if not self.type.strip():
+            raise ValueError("completion requirement type must not be empty")
+        if self.min_score is not None and self.type != "min_score":
+            raise ValueError("min_score is only valid for a requirement of type min_score")
+        return self
 
 
 class ModuleOverride(Override):
@@ -92,6 +154,7 @@ class ModuleItem(BaseModel):
     url: str | None = None
     quiz: UnmanagedRef | None = None
     discussion: UnmanagedRef | None = None
+    unmanaged: UnmanagedItem | None = None
     title: str | None = None
     indent: StrictInt = 0
     new_tab: bool = False
@@ -122,13 +185,15 @@ class ModuleItem(BaseModel):
             raise ValueError("header text must not be empty")
         elif kind == "url":
             _check_url(cast(str, value))
+        if kind == "unmanaged" and self.canvas_id is None:
+            raise ValueError("an unmanaged item needs its canvas_id")
         if self.indent < 0:
             raise ValueError("indent must be >= 0")
         return self
 
     @property
     def item_type(self) -> str:
-        """Which of the seven reference types this item has."""
+        """Which of the eight reference types this item has."""
         return next(t for t in _ITEM_TYPES if getattr(self, t) is not None)
 
 
@@ -150,8 +215,28 @@ class Module(CanvasObject):
     name: str
     published: bool | None = None
     unlock: LocalDT | None = None
+    # Carried, never written: prerequisites are module canvas_ids.
+    prerequisites: list[StrictInt] = []
+    require_sequential_progress: bool | None = None
+    completion_requirements: list[CompletionRequirement] = []
     overrides: list[ModuleOverride] = []  # unlock only
     items: list[ModuleItem] = []
+
+    @field_validator("prerequisites")
+    @classmethod
+    def _unique_prereqs(cls, v: list[int]) -> list[int]:
+        if len(set(v)) != len(v):
+            raise ValueError("duplicate prerequisite")
+        return v
+
+    @model_validator(mode="after")
+    def _no_self_prereq(self) -> Module:
+        if self.canvas_id is not None and self.canvas_id in self.prerequisites:
+            raise ValueError("a module cannot be its own prerequisite")
+        item_ids = [r.item_id for r in self.completion_requirements]
+        if len(set(item_ids)) != len(item_ids):
+            raise ValueError("duplicate completion requirement for one item")
+        return self
 
     @field_validator("overrides")
     @classmethod
@@ -206,7 +291,7 @@ def _parse_module(raw: object, idx: int, cfg: CourseConfig) -> Module:
             fixed.append(od)
         data["overrides"] = fixed
     # absent and null both mean "no value"
-    for key in ("overrides", "items"):
+    for key in ("overrides", "items", "prerequisites", "completion_requirements"):
         if key in data and data[key] is None:
             del data[key]
     try:
