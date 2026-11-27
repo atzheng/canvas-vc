@@ -26,7 +26,7 @@ import json
 import re
 import subprocess
 import tempfile
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -658,9 +658,11 @@ class Harness:
     last_output: str = ""
 
     @contextmanager
-    def scenario(self) -> Iterator[None]:
+    def scenario(self, hidden: Iterable[str] = ()) -> Iterator[None]:
         """Roll the clone back to its start unless the push really changed Canvas; then check
-        every seeded submission against its baseline."""
+        every seeded submission against its baseline. ``hidden`` names the suite assignment
+        keys whose submission Canvas is expected to hide (workflow_state "deleted") in this
+        scenario only; every other field must still match the baseline."""
         start = gitops.head_commit(self.root)
         main_before = gitops.ref_commit(self.root)
         try:
@@ -668,11 +670,20 @@ class Harness:
         finally:
             if gitops.ref_commit(self.root) == main_before and start:
                 self._git("reset", "--hard", "--quiet", start)
-            self.assert_submissions_unchanged()
+            self.assert_submissions_unchanged(hidden)
 
-    def assert_submissions_unchanged(self) -> None:
+    def assert_submissions_unchanged(self, hidden: Iterable[str] = ()) -> None:
+        """Compare every seeded submission with its baseline. Only the assignments named in
+        ``hidden`` may differ, and only by ``workflow_state == "deleted"`` (Canvas hides the
+        submission of a student who lost access; nothing else may change)."""
+        expected_hidden = {self.ids[k] for k in hidden}
         for aid, before in self.baseline.items():
             now = self.snapshot(aid)
+            if aid in expected_hidden:
+                assert now["workflow_state"] == "deleted", (
+                    f"submission on assignment {aid} should be hidden, is {now['workflow_state']}"
+                )
+                now = {**now, "workflow_state": before["workflow_state"]}
             assert now == before, f"submission on assignment {aid} changed: {before} -> {now}"
 
     def finish(self, state_file: Path | None = None) -> CleanupResult:

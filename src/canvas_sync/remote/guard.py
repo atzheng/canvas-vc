@@ -240,7 +240,10 @@ class SubmissionGuard:
         if _changed(op, "overrides", "assign_to_overrides_only") and op.after is not None:
             n = self._access_removed(op, aid, live, submissions(), path)
             if n:
-                msg = f"{path}: {n} student(s) with submissions lose access"
+                msg = (
+                    f"{path}: {n} student(s) with submissions lose access; "
+                    "Canvas will hide their submissions until access is restored"
+                )
                 risks.append(Risk(RiskKind.ACCESS_REMOVED, msg, CONFIRM_ACCESS))
         return _Evaluation(risks, blocks)
 

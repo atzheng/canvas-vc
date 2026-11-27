@@ -177,6 +177,22 @@ def test_static_access_risk_only_when_an_audience_drops_out() -> None:
     assert risks(assign_to_overrides_only=True, due=None) == [RiskKind.ACCESS_REMOVED]
 
 
+def test_plan_access_risk_names_audiences_and_says_canvas_hides_submissions() -> None:
+    old = asg(canvas_id=1, overrides=[Override(section="BA1"), Override(students=["ann", "bob"])])
+    path = "assignments/a.md"
+    new = old.model_copy(update={"overrides": [Override(students=["ann"])]})
+    (op,) = ops_of({path: old}, {path: new})
+    (risk,) = op.risks
+    assert risk.message == (
+        f"{path}: removes access for section BA1; student bob; students who submitted lose "
+        "access and Canvas will hide their submissions until access is restored"
+    )
+    new = old.model_copy(update={"assign_to_overrides_only": True, "due": None})
+    (op,) = ops_of({path: old}, {path: new})
+    assert "everyone not in an override" in op.risks[0].message
+    assert "hide their submissions until access is restored" in op.risks[0].message
+
+
 # ---- writer: minimal calls ---------------------------------------------------------------
 
 
@@ -397,7 +413,11 @@ def test_guard_counts_submitters_losing_access_without_naming_them(env: Env) -> 
     op = plan_of(base, target).ops[0]
     risks = env.guard.check(op)
     assert [(r.kind, r.message.split(": ", 1)[1]) for r in risks] == [
-        (RiskKind.ACCESS_REMOVED, "1 student(s) with submissions lose access")
+        (
+            RiskKind.ACCESS_REMOVED,
+            "1 student(s) with submissions lose access; "
+            "Canvas will hide their submissions until access is restored",
+        )
     ]
     with pytest.raises(GuardBlocked):
         env.push(base, target)
@@ -423,7 +443,11 @@ def test_overrides_only_turned_on_writes_overrides_first_then_the_flag(env: Env)
     assert [w.method for w in env.writes()] == ["POST", "PUT"]
     assert env.assignment(a["id"])["only_visible_to_overrides"] is True
     assert env.assignment(a["id"])["due_at"] is None
-    env.fake.assert_submissions_intact(snapshot)
+    # Canvas hides the BA2 student's submission (workflow_state only); nothing else changes.
+    (sub,) = env.fake.submissions[a["id"]]
+    (before,) = snapshot[a["id"]]
+    assert sub["workflow_state"] == "deleted"
+    assert {**sub, "workflow_state": before["workflow_state"]} == before
 
 
 # ---- unknown refs, mastery paths ---------------------------------------------------------

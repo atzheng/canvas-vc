@@ -308,3 +308,32 @@ def test_sanitizer_known_nested_cases() -> None:
 def test_sanitizer_idempotent_property(s: str) -> None:
     once = sanitize_html(s)
     assert sanitize_html(once) == once
+
+
+def test_removing_the_only_override_hides_the_submission_and_restoring_it_brings_it_back(
+    fake: FakeCanvas,
+) -> None:
+    from tests.fake_canvas.assignments import add_assignment
+
+    ann = fake.add_user("Ann Test")["id"]
+    bob = fake.add_user("Bob Test")["id"]
+    a = add_assignment(fake, "hw", only_visible_to_overrides=True)["id"]
+    row = {"user_id": ann, "workflow_state": "submitted", "attempt": 1, "body": "mine"}
+    fake.seed_submissions(a, [row, {**row, "user_id": bob, "body": "his"}])
+    client = fake.client("write")
+    base = f"/courses/{C}/assignments/{a}"
+
+    def states() -> dict[int, str]:
+        return {s["user_id"]: s["workflow_state"] for s in fake.submissions[a]}
+
+    ov = client.post(f"{base}/overrides", json={"assignment_override": {"student_ids": [ann]}})
+    assert states() == {ann: "submitted", bob: "deleted"}  # bob was never assigned: hidden
+    client.delete(f"{base}/overrides/{ov['id']}")
+    assert states() == {ann: "deleted", bob: "deleted"}
+    hidden = fake.submissions[a][0]
+    assert (hidden["body"], hidden["attempt"]) == ("mine", 1)  # only workflow_state changed
+    client.put(base, json={"assignment": {"only_visible_to_overrides": False}})
+    assert states() == {ann: "submitted", bob: "submitted"}
+    client.post(f"{base}/overrides", json={"assignment_override": {"student_ids": [ann]}})
+    client.put(base, json={"assignment": {"only_visible_to_overrides": True}})
+    assert states() == {ann: "submitted", bob: "deleted"}

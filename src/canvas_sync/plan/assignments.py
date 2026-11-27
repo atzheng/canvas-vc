@@ -212,6 +212,24 @@ def _lost(before: Override, after: Override) -> set[str]:
     return set(before.students or []) - set(after.students or [])
 
 
+def _dropped_audiences(
+    before: Sequence[Override], after: Sequence[Override], only_before: bool, only_after: bool
+) -> str:
+    """The audiences that leave, as written in the tree (section/group names, student refs)."""
+    kept_students = {s for o in after for s in (o.students or [])}
+    kept = {o.target() for o in after}
+    parts: list[str] = []
+    if only_after and not only_before:
+        parts.append("everyone not in an override")
+    for o in before:
+        kind, names = o.target()
+        if kind == "students":
+            parts.extend(f"student {s}" for s in names if s not in kept_students)
+        elif (kind, names) not in kept:
+            parts.append(f"{kind} {', '.join(names)}")
+    return "removes access for " + "; ".join(parts) if parts else "removes an override audience"
+
+
 def _risks(path: str, changes: dict[str, tuple[Any, Any]], only: bool = False) -> tuple[Risk, ...]:
     risks: list[Risk] = []
     if "points" in changes or "grading_type" in changes:
@@ -221,7 +239,11 @@ def _risks(path: str, changes: dict[str, tuple[Any, Any]], only: bool = False) -
         ov_old, ov_new = changes.get("overrides", ([], []))
         only_old, only_new = changes.get("assign_to_overrides_only", (False, False))
         if access_narrowed(ov_old, ov_new, bool(only_old), bool(only_new)):
-            msg = f"{path}: removes an override audience; students who submitted lose access"
+            who = _dropped_audiences(ov_old, ov_new, bool(only_old), bool(only_new))
+            msg = (
+                f"{path}: {who}; students who submitted lose access "
+                "and Canvas will hide their submissions until access is restored"
+            )
             risks.append(Risk(RiskKind.ACCESS_REMOVED, msg, CONFIRM_ACCESS))
         moved = moved_students(ov_old, ov_new) if only else 0
         if moved:
