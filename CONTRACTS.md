@@ -701,6 +701,7 @@ Implementation notes (fixed in 2zk.6):
 bytes`, `path_for(sha256)`. It lives in `.git/canvas-blobs/` and is shared by
 fetch (downloads) and apply (uploads). Files in the tree are real git blobs.
 `BlobStore` only avoids downloading the same file again.
+The files reader also keeps `.git/canvas-blobs/files-index.json` (`{file id: {updated_at, size, sha256}}`, written atomically; local cache, losing it only costs re-downloads) to skip unchanged downloads.
 
 ```python
 # ignore.py
