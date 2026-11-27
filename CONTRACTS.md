@@ -655,6 +655,15 @@ raised; the push CLI must report it as a stop, not a crash.
   never as DELETE + CREATE, because deletes run last.
 - A cleared value is `(old, None)` in `Operation.changes`; the writer sends an
   explicit null for it.
+- Assignments (`plan/assignments.py`): matched by `canvas_id`, else by path when the id was
+  stripped. An id-less file at the path of a base assignment matches it by path and updates it (never a delete + create, so submissions are kept); two target files with one `canvas_id` raise `ValidationError` naming both paths. A target `canvas_id` absent from base yields no op (deleted or no longer mirrored
+  on Canvas; never re-created). Groups are `AssignmentGroup` CREATE ops keyed
+  `assignments#group:<name>` (Kind.ASSIGNMENT), emitted before the assignments; the writer
+  reuses a same-named Canvas group and refuses duplicate names; groups are never deleted.
+  Override changes ride on the assignment's own UPDATE in `changes["overrides"]` /
+  `["assign_to_overrides_only"]` (never bare `Override` ops); the writer never sends
+  `assignment_overrides` and, until orx.9, the differ raises `ValidationError` at plan time for such a change (so nothing is written) and the writer refuses again. Static risk:
+  GRADING_CHANGE. LATE_POLICY_REGRADE and ACCESS_REMOVED come from the guard at apply time.
 - Modules are matched by `canvas_id` first, then by `modules.yaml#<name>` key
   (keys of repeated names are positional); that is the modules differ's job,
   core does not care how an operation's key was chosen.
@@ -701,7 +710,11 @@ Hard rules, which `confirmed` can't override:
   deliberately broad: `has_submitted_submissions`/`graded_submissions_exist`, or any
   submission (fetched with `include[]=submission_comments`) with a submitted state, score,
   grade, excused, comment, attempt, submission_type, body, url or attachment. The differ
-  has already turned it into UNPUBLISH + add to `.canvasignore`.
+  cannot know about submissions, so it emits a plain `DELETE` and this block is what
+  protects them: `apply` raises `GuardBlocked` in its pre-flight pass, before any write,
+  and the push CLI reports it as a refusal (restore the file, or add it to `.canvasignore`
+  and fetch). There is no UNPUBLISH fallback: Canvas refuses to unpublish an assignment
+  with submissions, and the guard hard-blocks it.
 - Changing `group_category` with submissions → `GuardBlocked`.
 - Any assignment group deletion → `GuardBlocked` (also not in the allowlist).
 
