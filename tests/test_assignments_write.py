@@ -79,13 +79,19 @@ def test_unknown_refs_unchanged_produce_no_ops() -> None:
     assert ops_of({"assignments/a.md": a}, {"assignments/a.md": a.model_copy()}) == []
 
 
-def test_override_change_is_carried_on_the_assignment_op() -> None:
+def test_override_change_is_refused_at_plan_time() -> None:
     old = asg(canvas_id=1)
     new = old.model_copy(update={"overrides": [Override(section="BA2")]})
-    (op,) = ops_of({"assignments/a.md": old}, {"assignments/a.md": new})
-    assert op.action is Action.UPDATE and op.key.kind is Kind.ASSIGNMENT
-    assert set(op.changes) == {"overrides"}
-    assert op.before is old and op.after is new  # the guard reads the id from these
+    with pytest.raises(ValidationError, match=r"assignments/a.md: pushing override changes"):
+        ops_of({"assignments/a.md": old}, {"assignments/a.md": new})
+    with pytest.raises(ValidationError, match="override changes"):
+        ops_of({}, {"assignments/n.md": asg(overrides=[Override(section="BA2")])})
+
+
+def test_duplicate_canvas_id_in_target_is_refused() -> None:
+    a = asg(canvas_id=1)
+    with pytest.raises(ValidationError, match=r"assignments/b.md.*assignments/a.md"):
+        ops_of({"assignments/a.md": a}, {"assignments/a.md": a, "assignments/b.md": a})
 
 
 def test_canvas_normalised_values_do_not_diff() -> None:
@@ -396,14 +402,27 @@ def test_update_sends_only_changed_fields_and_never_assignment_overrides(env: En
     assert all("assignment_overrides" not in str(w.body) for w in env.writes())
 
 
-def test_override_change_is_refused_before_any_write(env: Env) -> None:
+def test_override_change_plus_new_group_writes_nothing(env: Env) -> None:
     add_assignment(env.fake, "HW", points_possible=10.0)
     env.fake.add_section("BA2")
     base = env.fetch()
     path = next(iter(base.objects)).path
     target = edit(base, path, title="Changed", overrides=[Override(section="BA2")])
-    _, result, _ = env.push(base, target)
-    assert isinstance(result.error, CanvasSyncError) and "override" in str(result.error)
+    new = Assignment(title="New", group="Brand new group")
+    target = dataclasses.replace(
+        target, objects={**target.objects, ObjectKey(Kind.ASSIGNMENT, "assignments/new.md"): new}
+    )
+    with pytest.raises(ValidationError, match="override changes"):
+        env.push(base, target)
+    assert env.writes() == []
+
+
+def test_writer_refuses_override_change_as_second_line_of_defence(env: Env) -> None:
+    a = add_assignment(env.fake, "HW")
+    before = Assignment(canvas_id=a["id"], title="HW")
+    after = before.model_copy(update={"overrides": [Override(section="BA2")]})
+    with pytest.raises(CanvasSyncError):
+        remote.update(env.client, before, after, env.ctx())
     assert env.writes() == []
 
 

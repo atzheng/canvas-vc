@@ -27,9 +27,11 @@ from canvas_sync.model.base import CanvasObject, Kind, ObjectKey
 from canvas_sync.model.overrides import Override, validate_overrides
 from canvas_sync.plan.assignments import (
     OVERRIDE_FIELDS,
+    OVERRIDE_REFUSAL,
     AssignmentGroup,
     assignment_changes,
     group_key,
+    override_change,
 )
 from canvas_sync.plan.core import Action, Operation
 from canvas_sync.remote.context import ApplyContext, FetchContext
@@ -384,12 +386,8 @@ def _require_no_override_change(before: Assignment | None, after: Assignment) ->
     assignment body: Canvas would replace the whole set, including mastery-path overrides the
     reader does not mirror. Until then a change is refused *before* anything is written.
     """
-    old = before if before is not None else Assignment()
-    if any(getattr(old, f) != getattr(after, f) for f in OVERRIDE_FIELDS):
-        raise CanvasSyncError(
-            f"{after.title!r}: pushing override changes is not implemented yet; "
-            "edit overrides in Canvas and fetch"
-        )
+    if override_change(before, after):  # second line of defence: the differ refuses first
+        raise CanvasSyncError(OVERRIDE_REFUSAL.format(path=repr(after.title)))
 
 
 def create(client: CanvasClient, obj: CanvasObject, ctx: ApplyContext) -> int | str:

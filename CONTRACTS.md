@@ -655,13 +655,13 @@ raised; the push CLI must report it as a stop, not a crash.
 - A cleared value is `(old, None)` in `Operation.changes`; the writer sends an
   explicit null for it.
 - Assignments (`plan/assignments.py`): matched by `canvas_id`, else by path when the id was
-  stripped. A target `canvas_id` absent from base yields no op (deleted or no longer mirrored
+  stripped. An id-less file at the path of a base assignment matches it by path and updates it (never a delete + create, so submissions are kept); two target files with one `canvas_id` raise `ValidationError` naming both paths. A target `canvas_id` absent from base yields no op (deleted or no longer mirrored
   on Canvas; never re-created). Groups are `AssignmentGroup` CREATE ops keyed
   `assignments#group:<name>` (Kind.ASSIGNMENT), emitted before the assignments; the writer
   reuses a same-named Canvas group and refuses duplicate names; groups are never deleted.
   Override changes ride on the assignment's own UPDATE in `changes["overrides"]` /
   `["assign_to_overrides_only"]` (never bare `Override` ops); the writer never sends
-  `assignment_overrides` and, until orx.9, refuses such a change before any write. Static risk:
+  `assignment_overrides` and, until orx.9, the differ raises `ValidationError` at plan time for such a change (so nothing is written) and the writer refuses again. Static risk:
   GRADING_CHANGE. LATE_POLICY_REGRADE and ACCESS_REMOVED come from the guard at apply time.
 - Modules are matched by `canvas_id` first, then by `modules.yaml#<name>` key
   (keys of repeated names are positional); that is the modules differ's job,

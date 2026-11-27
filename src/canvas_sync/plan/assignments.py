@@ -35,6 +35,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, cast
 
+from canvas_sync.errors import ValidationError
 from canvas_sync.model.assignment import Assignment
 from canvas_sync.model.base import CanvasObject, Kind, ObjectKey
 from canvas_sync.plan.core import Action, Operation, Risk, RiskKind, changes_between
@@ -80,6 +81,16 @@ def assignment_changes(before: Assignment, after: Assignment) -> dict[str, tuple
     return changes
 
 
+OVERRIDE_REFUSAL = (
+    "{path}: pushing override changes is not implemented yet; edit overrides in Canvas and fetch"
+)
+
+
+def override_change(before: Assignment | None, after: Assignment) -> bool:
+    old = before if before is not None else Assignment()
+    return any(getattr(old, f) != getattr(after, f) for f in OVERRIDE_FIELDS)
+
+
 def _risks(path: str, changes: dict[str, tuple[Any, Any]]) -> tuple[Risk, ...]:
     if "points" in changes or "grading_type" in changes:
         msg = f"{path}: points/grading_type change reinterprets or rescales existing scores"
@@ -95,6 +106,14 @@ def _assignments(course: Course) -> dict[str, Assignment]:
 
 def diff_type(base: Course, target: Course) -> list[Operation]:
     old, new = _assignments(base), _assignments(target)
+    seen_ids: dict[int | str, str] = {}
+    for path, obj in sorted(new.items()):
+        if obj.canvas_id is not None:
+            if obj.canvas_id in seen_ids:
+                raise ValidationError(
+                    f"{path}: canvas_id {obj.canvas_id} is also in {seen_ids[obj.canvas_id]}"
+                )
+            seen_ids[obj.canvas_id] = path
     old_by_id = {o.canvas_id: p for p, o in old.items() if o.canvas_id is not None}
 
     matched: dict[str, str] = {}  # target path -> base path
@@ -113,6 +132,15 @@ def diff_type(base: Course, target: Course) -> list[Operation]:
             claimed.add(path)
         else:
             creates.append(path)
+
+    # Refuse at plan time, so that nothing at all is written (no partial push). Override
+    # writes are orx.9; it removes this check together with the writer hook.
+    for path in sorted(matched):
+        if override_change(old[matched[path]], new[path]):
+            raise ValidationError(OVERRIDE_REFUSAL.format(path=path))
+    for path in creates:
+        if override_change(None, new[path]):
+            raise ValidationError(OVERRIDE_REFUSAL.format(path=path))
 
     ops: list[Operation] = []
     updates: list[Operation] = []

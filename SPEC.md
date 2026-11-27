@@ -488,7 +488,7 @@ code by four independent layers, not left to good intentions.
 | Create or publish an announcement with no future `post_at` | posts at once and **emails students** | not a submission risk, but flagged in the plan and needs confirmation, because it can't be taken back |
 | Change `group_category` (group vs. individual assignment) | changes who owns submissions | **blocked** once submissions exist (Canvas also refuses) |
 | Change `grading_type` or `points` | existing scores are reinterpreted or rescaled | allowed only with `--confirm-grading-change hw1`. The plan shows how many graded submissions are affected |
-| Change due dates/overrides when a late policy is on | Canvas recalculates late penalties, which **changes existing grades** | warned in plan with a count of affected graded submissions. Needs `--confirm-grading-change` |
+| Change the due date (base or an override's) when a late policy is on; unlock/lock changes don't trigger it | Canvas recalculates late penalties, which **changes existing grades** | warned in plan with a count of affected graded submissions. Needs `--confirm-grading-change` |
 | Remove a student or section from an override, or turn on `assign_to_overrides_only` | the student loses access, and their submission is hidden from them (but kept) | warned in plan, listing affected students who have submitted. Needs confirmation |
 | Unpublish an assignment with submissions | Canvas refuses | not attempted; reported |
 | Change `submission_types` | existing submissions are kept | allowed, with a warning if submissions exist |
