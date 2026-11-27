@@ -159,8 +159,8 @@ Every date in the tree: assignment unlock/due/lock and override dates, page
 `publish_at`, announcement `post_at`, file unlock/lock (effective settings,
 including rules), module unlock. Grouped by ISO week (Monday start) in the
 course timezone, sorted within the week. Flags reuse the date checks of
-`validate` (factored into one function both call): lock before due, due before
-unlock, override outside the base window. Dates are displayed, never edited;
+`validate` (`commands.validate.date_problems`, a pure function both call): due after lock, unlock after due or lock,
+ambiguous fall-back times; each override date is checked the same way, plus override due after the base lock. Dates are displayed, never edited;
 filter by kind with `?kind=assignment`.
 
 ## 5. Files (`/files`, `/files/raw/<path>`) — bead mbz.7
