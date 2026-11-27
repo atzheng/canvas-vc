@@ -16,7 +16,7 @@ import os
 import re
 import subprocess
 import tempfile
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -332,6 +332,52 @@ def fast_forward(root: Path, ref: str = REMOTE_REF) -> bool:
     if ref_commit(root, ref) is None:
         return False
     return _run(root, ["merge", "--ff-only", ref], ok=(0, 1, 128)).returncode == 0
+
+
+def tree_with_carried_files(
+    root: Path,
+    new: str,
+    old: str,
+    managed: Collection[str] = (),
+    preserve: Collection[str] = (),
+) -> str | None:
+    """Tree of commit ``new`` with some of the files of commit ``old`` put back.
+
+    - files of ``old`` that ``new`` has no place for (paths in neither ``new`` nor
+      ``managed``): ``.gitignore``, a README;
+    - files in ``preserve`` that both commits have: ``old``'s blob wins, so content the
+      user wrote (comments, formatting) survives although the paths are semantically equal.
+
+    None if the result would equal ``new``'s tree. Built in a temporary index; the work
+    tree and the user's index are untouched."""
+
+    def listing(commit: str) -> dict[str, tuple[str, str]]:
+        out: dict[str, tuple[str, str]] = {}
+        for rec in _run(root, ["ls-tree", "-r", "-z", "--full-tree", commit]).stdout.split(b"\0"):
+            if b"\t" not in rec:
+                continue
+            meta, path = rec.split(b"\t", 1)
+            mode, kind, sha = meta.decode().split()
+            if kind == "blob":
+                out[path.decode()] = (mode, sha)
+        return out
+
+    have, was = listing(new), listing(old)
+    keep: list[bytes] = []
+    for path, (mode, sha) in was.items():
+        if path in have:
+            if path not in preserve or have[path][1] == sha:
+                continue
+        elif path in managed:
+            continue
+        keep.append(f"{mode} {sha}\t{path}".encode() + b"\0")
+    if not keep:
+        return None
+    with tempfile.TemporaryDirectory(prefix="canvas-index-") as tmp:
+        env = {"GIT_INDEX_FILE": str(Path(tmp) / "index")}
+        _run(root, ["read-tree", new], env=env)
+        _run(root, ["update-index", "--add", "-z", "--index-info"], env=env, stdin=b"".join(keep))
+        return _out(root, ["write-tree"], env=env)
 
 
 def ahead_behind(root: Path, ref: str = REMOTE_REF) -> tuple[int, int]:

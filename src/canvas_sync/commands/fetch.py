@@ -32,7 +32,7 @@ class FetchResult:
     changed: int  # number of tree paths that differ from the previous canvas/main
 
 
-def _bodies_at(root: Path, commit: str | None) -> Bodies:
+def bodies_at(root: Path, commit: str | None) -> Bodies:
     """``.canvas/bodies.json`` of a canvas/main commit (it exists only in snapshots)."""
     data = gitops.read_file_at(root, commit, BODIES_FILE) if commit else None
     if data is None:
@@ -50,7 +50,7 @@ def _changed(previous: Course | None, course: Course) -> int:
     return sum(1 for p in new.keys() | old.keys() if old.get(p) != new.get(p))
 
 
-def _committed_inputs(root: Path, config: CourseConfig) -> tuple[CourseConfig, IgnoreRules]:
+def committed_inputs(root: Path, config: CourseConfig) -> tuple[CourseConfig, IgnoreRules]:
     """course.yaml and .canvasignore as committed at HEAD, so uncommitted edits cannot leak
     into canvas/main. Without HEAD (clone) or when HEAD lacks or cannot parse them, the
     given config and the work tree's .canvasignore are used."""
@@ -77,10 +77,10 @@ def run_fetch(root: Path, client: CanvasClient, config: CourseConfig) -> FetchRe
     (clone) and the fallback; afterwards course.yaml and .canvasignore come from HEAD.
     """
     started = datetime.now(UTC).isoformat(timespec="seconds")
-    config, ignore = _committed_inputs(root, config)
+    config, ignore = committed_inputs(root, config)
     prev = gitops.ref_commit(root)
     previous = gitops.load_course_at(root, prev) if prev else None
-    bodies = _bodies_at(root, prev)
+    bodies = bodies_at(root, prev)
     ctx = FetchContext(
         config=config,
         tz=config.tz,

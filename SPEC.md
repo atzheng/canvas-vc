@@ -101,10 +101,19 @@ Then it:
    what Canvas actually stored: your content plus the newly assigned IDs.
    Because `HEAD` is a parent, `canvas/main` is now a descendant of your
    branch, just like a remote branch after `git push`.
-5. fast-forwards your branch to `canvas/main` (`git merge --ff-only`), which
-   brings in the new IDs. If the snapshot differs from `HEAD` in anything other
-   than IDs and `.canvas/` metadata, push reports it as a bug and leaves the
-   fast-forward to you. A second `push` is a no-op.
+5. moves your branch to the snapshot, which brings in the new IDs. Files that
+   Canvas has no place for (`.gitignore`, `.canvasignore`, a README, ignored
+   objects) and files whose content did not change (so comments and formatting
+   you wrote stay byte for byte) are kept: when there are any, the branch tip
+   is a merge commit (parents `HEAD` and `canvas/main`) whose tree is the
+   snapshot with those files put back, otherwise it is `canvas/main` itself.
+   Either way `canvas/main` is an ancestor of the branch. If Canvas stored
+   something different from what `HEAD` says (other than IDs and values you did
+   not write), push reports a bug, leaves `canvas/main` alone and does not
+   move the branch. If the move fails (uncommitted changes in the way), push
+   prints `git merge --ff-only refs/canvas/pushed`; do not use a plain
+   `git merge canvas/main`, which would drop the kept files. A second `push` is
+   a no-op.
 
 If the apply fails partway, nothing is lost. The next `fetch` records the
 partial state, and `pull` + `push` finishes the job.

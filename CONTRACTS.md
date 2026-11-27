@@ -839,8 +839,14 @@ class IgnoreRules:
 ```
 
 Commit messages on `canvas/main`: `canvas fetch: <n> changed` or
-`canvas push: <n> operations`. After a push the user's branch is fast-forwarded
-to `canvas/main`. There's no separate write-back commit.
+`canvas push: <n> operations`. After a push the user's branch is
+fast-forwarded to `canvas/main`, or, when HEAD has files the snapshot has no place for
+(`.gitignore`, `.canvasignore`, README, ignored objects) or files whose parsed content equals
+the snapshot's (user comments/formatting), to a merge commit with parents HEAD and canvas/main
+whose tree is the snapshot with those files restored from HEAD
+(`gitops.tree_with_carried_files`). `canvas/main` is an ancestor of the branch either way.
+If the fast-forward fails, the target commit is kept at `refs/canvas/pushed`. The unexpected-
+difference check runs before canvas/main is moved. There's no separate write-back commit.
 
 `plan.diff` and `validate` ignore every path under `.canvas/`.
 
