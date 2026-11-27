@@ -215,7 +215,7 @@ Per-type fields (frontmatter key = field name unless noted; all dates `LocalDT |
   Rule `match` globs (`model.files.glob_match`, relative to `files/`, gitignore-like, case-sensitive): `*`/`?`/`[..]` never cross `/`; `**/` = zero or more dirs, trailing `/**` = everything inside; a pattern without `/` matches the name of the file or any parent dir at any depth (`*.pdf`), one containing `/` (or a leading `/`) is anchored at `files/`; matching a directory selects everything inside it; a trailing `/` requires a directory; `\x` escapes. Intended to be unified with `ignore.py` later.
 - `Module` (`model/modules.py`): `name, canvas_id, published, unlock, overrides: list[Override] (unlock only), items: list[ModuleItem]`. `ModuleItem`: exactly one of `page | assignment | file | header | url | quiz | discussion` (the last two are `{canvas_id: int}`, for unmanaged objects), plus `title, indent: int = 0, new_tab = False, published: bool | None, canvas_id`.
   Details: `page`/`assignment` are local paths without type folder or extension, `file` is relative to `files/` (no leading `/`, no `..`); `url` must be http(s). `canvas_id` of modules and items is `int | None`; **always write it once known**, because `dump_tree` keys same-named modules positionally (`modules.yaml#<name>#2`), so renaming or reordering one of two same-named modules re-keys the other and plan/differ must match by `canvas_id` first. Module overrides use a local `ModuleOverride` (`section | group | students`, `title`, `unlock`; canonical order as for `Override`), which may be unified with `Override` later. `modules.yaml` is written only when there are modules; module and item order is exactly list order. Models raise pydantic `ValidationError` on construction (item with zero or several types, bad ref shape); `load` converts it to `errors.ValidationError` with `modules.yaml: [i].items[j]...` in the message. Duplicate `canvas_id`s within `modules.yaml` are rejected.
-- `Roster` (`model/roster.py`): `sections: list[str], groups_category: str | None`. `RosterCache` (untracked): `students: dict[ref, canvas_user_id]`, `sections: dict[name, id]`, `groups: dict[name, id]`.
+- `Roster` (`model/roster.py`): `sections: list[str], groups_category: str | None`. `RosterCache` (untracked): `students: dict[ref, canvas_user_id]`, `sections: dict[name, id]`, `groups: dict[name, id]`; `ref_for(user_id) -> str | None` is the inverse lookup for students.
 
 ```python
 # model/course.py
@@ -475,6 +475,14 @@ class ApplyContext:
     guard: SubmissionGuard
     blobs: BlobStore
 ```
+
+`remote/roster.py`: `read(client, ctx, *, aliases: Mapping[str, str] | None = None) -> RosterCache`
+(not `Roster`: `Roster` comes from the tracked `roster.yaml`). Refs follow `student_ref`
+(`login_id`, `sis:<id>`, or alias via `aliases`, alias -> login, from the untracked
+`roster-aliases.yaml`; `load_aliases(root)`). Active students only; users without a usable
+ref are skipped; duplicate refs or section names raise `ValidationError` (never naming a student). Alias lookup matches logins case-insensitively; an alias matching no student gets a one-line stderr warning (alias name only). Groups are limited to `ctx.previous.roster.groups_category` when known (a missing category warns and gives no groups); otherwise all groups, where names used in several categories are left out with a warning instead of failing. Warnings are one line each, printed with `rich` on stderr. `read` does no
+file I/O; `fetch_course` calls `write_cache(root, cache)` / `load_cache(root)`
+(`.canvas/roster-cache.json`).
 
 `remote/fetch.py`:
 
