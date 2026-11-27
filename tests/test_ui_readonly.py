@@ -29,6 +29,8 @@ GITOPS_READ_ALLOWLIST = {
     "conflict_marker_paths",
     "changed_paths",
     "last_fetch_time",
+    "log_commits",  # read-only: git --no-optional-locks log --name-only
+    "CommitInfo",  # result dataclass of log_commits
     "repo_root",  # read-only: git rev-parse --show-toplevel
 }
 

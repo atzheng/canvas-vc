@@ -209,7 +209,8 @@ Pending operations come from `commands.diff.build_plan(root)` (the plan
 the flag each needs (named, never actionable). Below: unpushed commits (in
 `HEAD`, not in `canvas/main`) and recent `canvas/main` commits (`canvas
 fetch` / `canvas push` messages with times). With no `canvas/main` the page
-shows the never-fetched message. Uncommitted changes are listed from
+shows the never-fetched message. A plan error (`CanvasSyncError`) shows as one line. The page
+says it is as of the last fetch. History comes from the read-only `gitops.log_commits`. Uncommitted changes are listed from
 `changed_paths` and called out as not in the plan.
 
 ## Reference index (no page of its own) — bead mbz.3
