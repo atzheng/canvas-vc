@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import typer
 
-from canvas_sync.commands import clone, diff, fetch, open, pull, push, status, validate
+from canvas_sync.commands import clone, diff, fetch, open, pull, push, status, ui, validate
 
 app = typer.Typer(
     name="canvas",
@@ -21,3 +21,4 @@ app.command("status")(status.status)
 app.command("diff")(diff.diff)
 app.command("validate")(validate.validate)
 app.command("open")(open.open_)
+app.command("ui")(ui.ui)

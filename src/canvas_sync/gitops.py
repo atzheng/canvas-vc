@@ -241,7 +241,9 @@ def conflict_marker_paths(root: Path) -> list[str]:
 
 def is_clean(root: Path) -> bool:
     """No staged or unstaged changes to tracked files. Untracked files are not counted."""
-    return not _run(root, ["status", "--porcelain", "--untracked-files=no"]).stdout.strip()
+    return not _run(
+        root, ["--no-optional-locks", "status", "--porcelain", "--untracked-files=no"]
+    ).stdout.strip()
 
 
 def read_tree_files(root: Path, commit: str) -> dict[str, bytes]:
@@ -391,7 +393,9 @@ def ahead_behind(root: Path, ref: str = REMOTE_REF) -> tuple[int, int]:
 
 def changed_paths(root: Path) -> list[str]:
     """Tracked files with staged or unstaged changes (untracked files are not counted)."""
-    out = _run(root, ["status", "--porcelain", "-z", "--untracked-files=no"]).stdout.decode()
+    out = _run(
+        root, ["--no-optional-locks", "status", "--porcelain", "-z", "--untracked-files=no"]
+    ).stdout.decode()
     recs = out.split("\0")
     paths: list[str] = []
     i = 0

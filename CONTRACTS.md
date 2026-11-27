@@ -918,15 +918,21 @@ Markdown bodies render with `markdown-it-py`, already a dependency.
 - Reads the tree through `model.course.load_tree` and `gitops`
   (`load_course_at`, `ahead_behind`, `read_tree_files`, `head_commit`,
   `ref_commit`, `operation_in_progress`, `conflict_marker_paths`,
-  `changed_paths`, `last_fetch_time`) only. No `gitops` function that changes
+  `changed_paths`, `last_fetch_time`, and the read-only `repo_root`) only. No `gitops` function that changes
   refs, the index or the work tree (`update_ref`, `write_tree`,
   `commit_tree`, `merge`, `fast_forward`, `merge_with_output`,
-  `record_fetch_time`, ...).
+  `record_fetch_time`, ...). The scan also forbids importing `subprocess`, `shutil`,
+  `tempfile`, `open()` with a write/append/update mode (or a non-literal mode), and
+  `write_text`/`write_bytes`.
 - Never shows `.canvas/roster-cache.json` content (real student names).
   Overrides are shown by alias/section/group as written in the tree. Calling
   `validate_tree` is allowed (it reads the cache to check names) but the UI
   shows only `Issue.path` and `Issue.message`; a test asserts that a seeded
   cache name never appears in any page.
+- Rejects any request whose `Host` header is not `127.0.0.1` or `localhost`
+  (optional `:port`) with `403` (DNS-rebinding guard).
+- Does not even rewrite the git index: `gitops.is_clean` and `gitops.changed_paths`
+  run `git --no-optional-locks status`.
 - Every request reloads from disk: no caching, no file watching.
 - A path from a URL is never joined to the file system directly. It is looked
   up as a key of the loaded course (`Course.objects`, which includes the
@@ -977,7 +983,7 @@ class Response:
     headers: tuple[tuple[str, str], ...] = ()
 def page(title: str, body: str, *, current: str, config: CourseConfig | None) -> Response
     # full document: nav bar (Overview Modules Objects Timeline Files Changes),
-    # `current` highlighted, course title from config, link to /static/ui.css
+    # `current` highlighted, course name from config (course.yaml has no title, so "course <id>"), link to /static/ui.css
 def not_found(msg: str = "not found") -> Response
 def error_page(msg: str, status: int = 500) -> Response
 ```
@@ -1000,7 +1006,8 @@ class State:                         # built fresh per request by State.load(roo
     @classmethod
     def load(cls, root: Path) -> "State"
     def remote_course(self) -> Course | None     # load_course_at(canvas/main); None when never fetched
-    def index(self) -> Index                      # ui.index.build_index(course), computed on demand
+    def index(self) -> Index         # ui.index.build_index(course), built lazily once per State
+                                     # (one build per request); ValueError if course is None
 
 # every view module:
 def render(state: State, path: str, query: Mapping[str, list[str]]) -> Response
