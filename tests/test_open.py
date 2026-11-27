@@ -16,7 +16,10 @@ BASE = "https://canvas.example.edu/courses/12345"
 SHA = "a" * 64
 COURSE = "canvas_url: https://canvas.example.edu\ncourse_id: 12345\ntimezone: America/Vancouver\n"
 META = f"files:\n  lectures/01.pdf: {{canvas_id: 5551212, sha256: '{SHA}'}}\n"
-MODULES = "- name: Week 1\n  canvas_id: 4433\n  items: []\n- name: Week 1\n  canvas_id: 4434\n  items: []\n"
+MODULES = (
+    "- name: Week 1\n  canvas_id: 4433\n  items: []\n"
+    "- name: Week 1\n  canvas_id: 4434\n  items: []\n"
+)
 
 
 @pytest.fixture
