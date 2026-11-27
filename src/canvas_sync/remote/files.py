@@ -14,13 +14,16 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
+from rich.console import Console
+
 from canvas_sync import gitops
 from canvas_sync.dates import from_canvas
-from canvas_sync.errors import CanvasAPIError, CanvasSyncError
+from canvas_sync.errors import CanvasAPIError
 from canvas_sync.model.base import CanvasObject
 from canvas_sync.model.files import FileEntry, FileSettings, FilesMeta
 from canvas_sync.remote.context import ApplyContext, FetchContext
@@ -41,6 +44,10 @@ class _Remote:
 # ---------------------------------------------------------------------------
 # Pure helpers
 # ---------------------------------------------------------------------------
+
+
+def _nfc(s: str) -> str:
+    return unicodedata.normalize("NFC", s)
 
 
 def fold_settings(remote: FileSettings, base: FileSettings) -> dict[str, Any]:
@@ -126,30 +133,46 @@ def _save_index(path: Path, index: dict[str, dict[str, Any]]) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _list_remote(client: CanvasClient, ctx: FetchContext) -> list[_Remote]:
+def _warn(msg: str) -> None:
+    Console(stderr=True).print(f"warning: {msg}", markup=False, highlight=False)
+
+
+def _list_remote(client: CanvasClient, ctx: FetchContext) -> tuple[list[_Remote], set[int]]:
+    """Remote files (NFC tree paths, ignored ones left out) and the ids of ignored files.
+
+    Names that cannot be stored (bad name, or a case-insensitive collision with
+    another file) are skipped with a warning; of a colliding pair the lowest id wins.
+    """
     folders = client.get(f"/courses/{client.course_id}/folders", _PER_PAGE)
     paths = _folder_paths(
         [f for f in folders if f.get("context_type", "Course") == "Course"],
         ctx.config.files_root,
     )
-    found: list[_Remote] = []
-    seen: dict[str, str] = {}
+    cands: list[_Remote] = []
+    ignored_ids: set[int] = set()
     for folder_id in sorted(paths, key=lambda i: paths[i]):
         prefix = paths[folder_id]
         for f in client.get(f"/folders/{folder_id}/files", _PER_PAGE):
             name = str(f.get("display_name") or f.get("filename") or "")
-            rel = f"{prefix}/{name}" if prefix else name
+            rel = _nfc(f"{prefix}/{name}" if prefix else name)
             tree = _PREFIX + rel
             if not name or "/" in name or "_meta.yaml" in tree.split("/"):
-                raise CanvasSyncError(f"{tree}: Canvas file name cannot be stored in the tree")
-            if ctx.ignore.ignored(tree):
+                _warn(f"{tree}: Canvas file name cannot be stored in the tree; skipped")
                 continue
-            folded = tree.casefold()
-            if folded in seen:
-                raise CanvasSyncError(f"{tree}: collides with {seen[folded]} (case-insensitive)")
-            seen[folded] = tree
-            found.append(_Remote(f, tree))
-    return found
+            if ctx.ignore.ignored(tree):
+                ignored_ids.add(int(f["id"]))
+                continue
+            cands.append(_Remote(f, tree))
+    found: list[_Remote] = []
+    seen: dict[str, str] = {}
+    for r in sorted(cands, key=lambda r: int(r.data["id"])):
+        folded = r.path.casefold()
+        if folded in seen:
+            _warn(f"{r.path}: collides with {seen[folded]} (case-insensitive); skipped")
+            continue
+        seen[folded] = r.path
+        found.append(r)
+    return found, ignored_ids
 
 
 def _match_previous(
@@ -169,7 +192,8 @@ def _match_previous(
             matched[by_remote_id[cid].path] = entry
         else:
             leftover.append(entry)
-    for entry in leftover:
+    claims: dict[str, list[tuple[bool, str, FileEntry]]] = {}
+    for entry in sorted(leftover, key=lambda e: _nfc(e.path)):
         if entry.canvas_id is None:
             continue
         try:
@@ -187,8 +211,11 @@ def _match_previous(
         new_id = cast("dict[str, Any]", new).get("id") if isinstance(new, dict) else None
         hit = by_remote_id.get(int(new_id)) if new_id is not None else None
         if hit is not None and hit.path not in matched:
-            matched[hit.path] = entry
-    by_path = {_PREFIX + e.path: e for e in leftover}
+            same = _nfc(_PREFIX + entry.path) == hit.path
+            claims.setdefault(hit.path, []).append((not same, _nfc(entry.path), entry))
+    for path, found in claims.items():
+        matched[path] = min(found, key=lambda t: (t[0], t[1]))[2]  # same path, then lowest path
+    by_path = {_nfc(_PREFIX + e.path): e for e in leftover}
     used = {id(e) for e in matched.values()}
     for r in remote:
         e = by_path.get(r.path)
@@ -203,11 +230,13 @@ def read_files_meta(client: CanvasClient, ctx: FetchContext) -> FilesMeta:
     ``ctx.previous`` (people edit those); ``files`` holds only ids, hashes,
     ``stable_link`` and the settings that differ from what the rules give."""
     prev_meta = ctx.previous.files_meta if ctx.previous else FilesMeta()
-    remote = _list_remote(client, ctx)
+    remote, ignored_ids = _list_remote(client, ctx)
     matched = _match_previous(client, remote, prev_meta.files)
     index_file = _index_path(ctx)
     index = _load_index(index_file)
-    new_index: dict[str, dict[str, Any]] = {}
+    new_index: dict[str, dict[str, Any]] = {
+        i: index[i] for i in map(str, ignored_ids) if i in index
+    }
     files: dict[str, FileEntry] = {}
     base_meta = FilesMeta(defaults=prev_meta.defaults, rules=prev_meta.rules)
     for r in remote:

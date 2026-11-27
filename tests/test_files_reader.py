@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
+import unicodedata
 from datetime import datetime
 from pathlib import Path
 from typing import Any, cast
@@ -11,10 +13,9 @@ import pytest
 
 from canvas_sync.config import CourseConfig
 from canvas_sync.dates import to_canvas
-from canvas_sync.errors import CanvasSyncError
 from canvas_sync.ignore import IgnoreRules
 from canvas_sync.model.course import Course
-from canvas_sync.model.files import FileEntry, FileRule, FileSettings, FilesMeta
+from canvas_sync.model.files import FILE_SPEC, FileEntry, FileRule, FileSettings, FilesMeta
 from canvas_sync.model.roster import Roster, RosterCache
 from canvas_sync.remote import files as remote_files
 from canvas_sync.remote.context import FetchContext
@@ -253,9 +254,66 @@ def test_pagination(repo: Path) -> None:
     assert len(remote_files.read(fake.client("read"), ctx_for(repo))) == 5
 
 
-def test_case_collision_raises(repo: Path) -> None:
+def test_case_collision_skips_later_file_with_warning(
+    repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     fake = FakeCanvas()
+    low = fake.add_file(fake.root_folder_id, "a.pdf", b"2")
     fake.add_file(fake.root_folder_id, "A.pdf", b"1")
-    fake.add_file(fake.root_folder_id, "a.pdf", b"2")
-    with pytest.raises(CanvasSyncError, match="collides"):
-        remote_files.read(fake.client("read"), ctx_for(repo))
+    out = remote_files.read(fake.client("read"), ctx_for(repo))
+    assert list(out) == ["files/a.pdf"]
+    assert out["files/a.pdf"].canvas_id == low["id"]
+    err = capsys.readouterr().err
+    assert "files/A.pdf" in err and "files/a.pdf" in err
+
+
+def test_unstorable_name_skipped_with_warning(
+    repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    fake = FakeCanvas()
+    fake.add_file(fake.root_folder_id, "_meta.yaml", b"1")
+    fake.add_file(fake.root_folder_id, "ok.pdf", b"2")
+    assert list(remote_files.read(fake.client("read"), ctx_for(repo))) == ["files/ok.pdf"]
+    assert "_meta.yaml" in capsys.readouterr().err
+
+
+def test_nfd_name_is_nfc_and_stable_through_dump_load(fake: FakeCanvas, repo: Path) -> None:
+    nfd = unicodedata.normalize("NFD", "caf\u00e9.pdf")
+    f = fake.add_file(fake.root_folder_id, nfd, b"c")
+    first = remote_files.read_files_meta(fake.client("read"), ctx_for(repo))
+    key = "files/" + unicodedata.normalize("NFC", nfd)
+    assert key in first.files
+    pinned = pin_stable(first, key)
+    cfg = make_cfg()
+    reloaded = FILE_SPEC.load_files_meta(_write(repo, pinned, cfg), cfg)
+    replace_file(fake, int(f["id"]), b"c2")  # id changes; match must come via path/chain
+    second = remote_files.read_files_meta(fake.client("read"), ctx_for(repo, previous=reloaded))
+    assert second.files[key].stable_link is True
+    again = remote_files.read_files_meta(fake.client("read"), ctx_for(repo, previous=second))
+    assert again == second
+
+
+def _write(root: Path, meta: FilesMeta, cfg: CourseConfig) -> Path:
+    for rel, data in FILE_SPEC.dump_files_meta(meta, cfg).items():
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_bytes(data)
+    return root
+
+
+def test_two_previous_entries_same_new_id_deterministic(fake: FakeCanvas, repo: Path) -> None:
+    first = remote_files.read_files_meta(fake.client("read"), ctx_for(repo))
+    old = first.files["files/syllabus.pdf"]
+    ghost = FileEntry(canvas_id=424242, path="aaa.pdf", sha256="", stable_link=True)
+    prev = FilesMeta(files={**first.files, "files/aaa.pdf": ghost})
+    new = replace_file(fake, int(old.canvas_id or 0), b"v2")
+    fake.state("files")["chain"][424242] = new["id"]
+    out = remote_files.read_files_meta(fake.client("read"), ctx_for(repo, previous=prev))
+    # entry whose path equals the remote path wins (syllabus.pdf, not stable_link)
+    assert out.files["files/syllabus.pdf"].stable_link is False
+
+
+def test_ignored_files_keep_index_entries(fake: FakeCanvas, repo: Path) -> None:
+    remote_files.read(fake.client("read"), ctx_for(repo))
+    remote_files.read(fake.client("read"), ctx_for(repo, ignore=["lectures/"]))
+    index = json.loads((repo / ".git" / "canvas-blobs" / remote_files.INDEX_NAME).read_text())
+    assert len(index) == 2
