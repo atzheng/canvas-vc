@@ -16,7 +16,7 @@ import os
 import re
 import subprocess
 import tempfile
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -302,3 +302,36 @@ def fast_forward(root: Path, ref: str = REMOTE_REF) -> bool:
     if ref_commit(root, ref) is None:
         return False
     return _run(root, ["merge", "--ff-only", ref], ok=(0, 1, 128)).returncode == 0
+
+
+def tree_with_carried_files(
+    root: Path, new: str, old: str, managed: Collection[str] = ()
+) -> str | None:
+    """Tree of commit ``new`` plus the files of commit ``old`` that ``new`` has no place for
+    (paths in neither ``new`` nor ``managed``): ``.gitignore``, a README. None if there are
+    none. Built in a temporary index; the work tree and the user index are untouched."""
+
+    def listing(commit: str) -> list[tuple[str, str, str]]:
+        out: list[tuple[str, str, str]] = []
+        for rec in _run(root, ["ls-tree", "-r", "-z", "--full-tree", commit]).stdout.split(b"\0"):
+            if b"\t" not in rec:
+                continue
+            meta, path = rec.split(b"\t", 1)
+            mode, kind, sha = meta.decode().split()
+            if kind == "blob":
+                out.append((mode, sha, path.decode()))
+        return out
+
+    have = {path for _, _, path in listing(new)} | set(managed)
+    keep = [
+        f"{mode} {sha}\t{path}".encode() + b"\0"
+        for mode, sha, path in listing(old)
+        if path not in have
+    ]
+    if not keep:
+        return None
+    with tempfile.TemporaryDirectory(prefix="canvas-index-") as tmp:
+        env = {"GIT_INDEX_FILE": str(Path(tmp) / "index")}
+        _run(root, ["read-tree", new], env=env)
+        _run(root, ["update-index", "--add", "-z", "--index-info"], env=env, stdin=b"".join(keep))
+        return _out(root, ["write-tree"], env=env)
