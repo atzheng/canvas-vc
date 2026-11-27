@@ -10,13 +10,14 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 from canvas_sync.ui.layout import Response, error_page, not_found
 from canvas_sync.ui.state import State
-from canvas_sync.ui.views import overview
+from canvas_sync.ui.views import modules, overview
 
 Render = Callable[[State, str, Mapping[str, list[str]]], Response]
 
 # Prefix -> view. Later beads add their import above and one line here.
 ROUTES: dict[str, Render] = {
     "/": overview.render,
+    "/modules": modules.render,
 }
 
 
