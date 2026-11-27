@@ -52,8 +52,11 @@ WRITER_MODULES: dict[Kind, str] = {
 
 
 def needs_guard(op: Operation) -> bool:
-    """Operations that go through the submission guard: assignment operations
-    and module operations that touch an assignment item."""
+    """Operations that go through the guard: assignment operations, module
+    operations that touch an assignment item, and announcement creates/updates
+    (defence in depth for the notify-students risk; the check uses no network)."""
+    if op.key.kind is Kind.ANNOUNCEMENT:
+        return op.action in (Action.CREATE, Action.UPDATE)
     return op.key.kind is Kind.ASSIGNMENT or op.touches_assignment
 
 

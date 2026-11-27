@@ -405,3 +405,21 @@ def test_ctx_ids_filled_for_later_ops() -> None:
         writers={Kind.PAGE: FakeWriter([]), Kind.MODULE: Peek([])},
     )
     assert seen == {key(Kind.PAGE, "pages/a.md"): 101}
+
+
+def test_announcement_posting_now_refused_without_confirm_notify_even_if_differ_forgot() -> None:
+    from canvas_sync.model.announcement import Announcement
+    from canvas_sync.remote.guard import SubmissionGuard
+
+    ann = Announcement(title="hi", published=True, post_at=None)
+    # no static risk on the op: only the guard can catch it; it makes no network call
+    o = Operation(key(Kind.ANNOUNCEMENT, "announcements/hi.md"), Action.CREATE, None, ann, {}, ())
+    plan = Plan([o])
+    ctx = dataclasses.replace(make_ctx(FakeGuard()), guard=SubmissionGuard(cast(Any, None), CFG))
+    log: list[str] = []
+    writers = {k: FakeWriter(log) for k in Kind}
+    with pytest.raises(GuardBlocked, match="confirm-notify"):
+        apply(plan, cast(Any, None), ctx, confirmed=set(), writers=writers)
+    assert log == []
+    res = apply(plan, cast(Any, None), ctx, confirmed={"--confirm-notify"}, writers=writers)
+    assert res.error is None and len(log) == 1
