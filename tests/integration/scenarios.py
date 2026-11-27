@@ -227,6 +227,9 @@ def override_removal(h: Harness) -> str:
     return f"{a}; confirmed removal pushed, submission hidden (not destroyed)"
 
 
+override_removal.leaves_hidden = ("access",)  # type: ignore[attr-defined]
+
+
 def access_restored(h: Harness) -> str:
     """Put 'access' back to a plain assignment (overrides-only off, no override). The submission
     hidden by ``override_removal`` comes back, equal to the baseline (checked by
