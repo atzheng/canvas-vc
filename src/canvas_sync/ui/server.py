@@ -54,10 +54,23 @@ def dispatch(root: Path, raw_target: str) -> Response:
         return error_page(" ".join(f"{type(e).__name__}: {e}".split()))
 
 
+def host_ok(header: str | None) -> bool:
+    """Only ``127.0.0.1`` / ``localhost`` (optional port) may be the Host (DNS-rebinding guard)."""
+    if not header:
+        return False
+    name, sep, port = header.rpartition(":")
+    if not sep or not port.isdigit():
+        name = header
+    return name.lower() in ("127.0.0.1", "localhost")
+
+
 def _handler(root: Path) -> type[BaseHTTPRequestHandler]:
     class Handler(BaseHTTPRequestHandler):
         def _serve(self, head_only: bool) -> None:
-            r = dispatch(root, self.path)
+            if not host_ok(self.headers.get("Host")):
+                r = Response(403, b"forbidden host", "text/plain; charset=utf-8")
+            else:
+                r = dispatch(root, self.path)
             self.send_response(r.status)
             self.send_header("Content-Type", r.content_type)
             self.send_header("Content-Length", str(len(r.body)))

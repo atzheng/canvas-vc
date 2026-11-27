@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from canvas_sync import gitops
 from canvas_sync.errors import CanvasSyncError
 from canvas_sync.model.course import Course, load_tree
+from canvas_sync.ui.index import Index, build_index
 
 
 @dataclass(frozen=True)
@@ -17,6 +18,9 @@ class State:
     load_error: str | None
     head: str | None
     remote: str | None  # canvas/main commit; None = never fetched
+    _cache: dict[str, Index] = field(
+        default_factory=lambda: dict[str, Index](), compare=False, repr=False
+    )
 
     @classmethod
     def load(cls, root: Path) -> State:
@@ -32,3 +36,11 @@ class State:
         if self.remote is None:
             return None
         return gitops.load_course_at(self.root, self.remote)
+
+    def index(self) -> Index:
+        """Index of the loaded course, built at most once per State (i.e. per request)."""
+        if self.course is None:
+            raise ValueError("no course loaded")
+        if "index" not in self._cache:
+            self._cache["index"] = build_index(self.course)
+        return self._cache["index"]
