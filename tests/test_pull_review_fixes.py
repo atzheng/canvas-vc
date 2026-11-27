@@ -14,7 +14,6 @@ from canvas_sync.commands import status as status_cmd
 from tests.fake_canvas.core import FakeCanvas
 from tests.test_pull_status_diff import (  # noqa: F401  (fixtures)
     SYLLABUS,
-    _files_differ_stub,
     commit,
     fake,
     fetch,
