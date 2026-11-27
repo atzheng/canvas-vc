@@ -183,8 +183,9 @@ sets them (rule or entry), backlinks (pages, assignments, announcements,
 module items) and an `unreferenced` badge, from the reference index.
 `/files/raw/<path>` serves the bytes of a regular, non-symlink file under the
 working tree's `files/` only (the path must be a key of the loaded tree),
-with `Content-Disposition: attachment` except for images and PDF, and
-`X-Content-Type-Options: nosniff`.
+inline only for PNG, JPEG, GIF, WebP and PDF; everything else (SVG and HTML
+included) is an attachment of type `application/octet-stream`; always with
+`X-Content-Type-Options: nosniff` (rules in CONTRACTS.md section 13).
 
 ## 6. Changes (`/changes`) — bead mbz.8
 

@@ -989,6 +989,17 @@ page with a one-line message, never a traceback):
 | `/changes` | pending plan and history (`views/changes.py`) | mbz.8 |
 | `/static/ui.css` | stylesheet, the only static file | mbz.2 |
 
+**`/files/raw/<path>` rules** (`views/files.py`, tested). `<path>` (percent-decoded
+once by the server) is looked up as `files/<path>` among the loaded course's files
+entries (NFC-normalised as a fallback); no match, including `_meta.yaml`, is `404`.
+Only then is the file opened: `<root>/files` and every component below it must not be a
+symlink, the target must be a regular file whose resolved path is inside the resolved
+`<root>/files`; otherwise `404`. Bytes come from the working tree, never the blob store.
+Headers: `X-Content-Type-Options: nosniff`, `Content-Security-Policy: default-src 'none';
+style-src 'unsafe-inline'; sandbox`; PNG, JPEG, GIF, WebP and PDF are served inline with their
+guessed type; everything else (including SVG and HTML) is
+`application/octet-stream` with `Content-Disposition: attachment`.
+
 **Shared page layout** (`ui/layout.py`, created by mbz.2, used by all views):
 
 ```python
