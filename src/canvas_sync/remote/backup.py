@@ -78,10 +78,20 @@ def _late_policy(client: CanvasClient, course_id: int) -> Any:
         raise
 
 
+def _private_dirs(directory: Path) -> None:
+    """Create ``directory`` and any missing parents, each chmod 0700 (mkdir's mode is
+    masked by umask and ignored for parents). Only directories created here are changed;
+    pre-existing ones (``~``, a ``~/.canvas-sync`` the user made) are left as they are."""
+    missing = [d for d in (directory, *directory.parents) if not d.exists()]
+    for d in reversed(missing):
+        d.mkdir(mode=0o700)
+        d.chmod(0o700)
+
+
 def _write(directory: Path, data: dict[str, Any], ids: list[int]) -> Path:
     try:
         _refuse_inside_course_repo(directory.resolve())
-        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        _private_dirs(directory)
         stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S")
         text = json.dumps(data, indent=2, sort_keys=True)
         for n in range(1000):

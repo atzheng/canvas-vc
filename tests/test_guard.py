@@ -133,7 +133,7 @@ def test_delete_blocked_when_assignment_flags_lag_but_submissions_exist(fake: Fa
 def test_delete_ignores_unsubmitted_placeholders(fake: FakeCanvas) -> None:
     a = gf.add_assignment(fake)
     fake.seed_submissions(
-        a["id"], [{"user_id": 7, "workflow_state": "unsubmitted", "submitted_at": None}]
+        a["id"], [{"user_id": 7, "workflow_state": "unsubmitted", "submitted_at": None, "attempt": None, "submission_type": None, "body": None}]
     )
     make_guard(fake).assert_allowed(delete_op(a["id"]), set())
 
@@ -501,3 +501,30 @@ def test_guard_does_not_trust_the_plans_view_of_submissions(fake: FakeCanvas) ->
     fake.state("guard_assignments")[a["id"]]["has_submitted_submissions"] = True
     with pytest.raises(GuardBlocked):
         make_guard(fake).assert_allowed(stale, set())
+
+
+@pytest.mark.parametrize(
+    "work",
+    [
+        {"submission_comments": [{"id": 1, "comment": "please resubmit"}]},
+        {"attempt": 1},
+        {"submission_type": "online_text_entry"},
+        {"body": "<p>answer</p>"},
+        {"url": "https://example.edu/x"},
+        {"attachments": [{"id": 9}]},
+    ],
+)
+def test_delete_blocked_by_any_kind_of_student_work(fake: FakeCanvas, work: dict[str, Any]) -> None:
+    """Flags say no submissions; the only trace is a comment, attempt, body, ..."""
+    a = gf.add_assignment(fake, has_submitted_submissions=False)
+    placeholder = {"user_id": 7, "workflow_state": "unsubmitted", "submitted_at": None}
+    fake.seed_submissions(a["id"], [{**placeholder, "score": None, "grade": None, **work}])
+    with pytest.raises(GuardBlocked):
+        make_guard(fake).assert_allowed(delete_op(a["id"]), EVERY_FLAG)
+    assert any(
+        e.params.get("include[]") == ["submission_comments"]
+        or "submission_comments" in str(e.params)
+        for e in fake.log
+        if e.path.endswith("/submissions")
+    )
+    no_writes(fake)

@@ -32,13 +32,20 @@ Row = dict[str, Any]
 
 
 def _is_submitted(sub: Row) -> bool:
-    """Student work exists: not just Canvas's per-student 'unsubmitted' placeholder."""
+    """Any student work or teacher feedback exists, not just Canvas's per-student
+    'unsubmitted' placeholder. Deliberately broad (a comments-only submission counts)."""
     return bool(
         sub.get("workflow_state") in _SUBMITTED_STATES
         or sub.get("submitted_at") is not None
         or sub.get("score") is not None
         or sub.get("grade") is not None
         or sub.get("excused")
+        or sub.get("submission_comments")
+        or sub.get("attempt") is not None
+        or sub.get("submission_type") is not None
+        or sub.get("body")
+        or sub.get("url")
+        or sub.get("attachments")
     )
 
 
@@ -180,7 +187,9 @@ class SubmissionGuard:
         def submissions() -> list[Row]:
             nonlocal subs_cache
             if subs_cache is None:
-                subs_cache = self._get_list(f"{base}/submissions", path)
+                subs_cache = self._get_list(
+                    f"{base}/submissions", path, {"include[]": ["submission_comments"]}
+                )
             return subs_cache
 
         flagged = bool(

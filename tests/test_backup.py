@@ -147,3 +147,15 @@ def test_errors_do_not_carry_student_data(fake: FakeCanvas, home: Path) -> None:
     with pytest.raises(BackupError) as exc:
         backup(fake.client(), cfg(), [aid])
     assert "Ada" not in str(exc.value) and "12345678" not in str(exc.value)
+
+
+def test_every_directory_created_is_private(
+    fake: FakeCanvas, home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    old = __import__("os").umask(0o022)
+    try:
+        path = backup(fake.client(), cfg(), [seeded(fake)])
+    finally:
+        __import__("os").umask(old)
+    for d in (home / ".canvas-sync", home / ".canvas-sync" / "backups", path.parent):
+        assert stat.S_IMODE(d.stat().st_mode) == 0o700

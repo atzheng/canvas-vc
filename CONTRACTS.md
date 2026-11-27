@@ -602,7 +602,10 @@ class SubmissionGuard:
 ```
 
 Hard rules, which `confirmed` can't override:
-- `DELETE` on an assignment with any submission → `GuardBlocked`. The differ
+- `DELETE` on an assignment with any submission → `GuardBlocked`. "Has submissions" is
+  deliberately broad: `has_submitted_submissions`/`graded_submissions_exist`, or any
+  submission (fetched with `include[]=submission_comments`) with a submitted state, score,
+  grade, excused, comment, attempt, submission_type, body, url or attachment. The differ
   has already turned it into UNPUBLISH + add to `.canvasignore`.
 - Changing `group_category` with submissions → `GuardBlocked`.
 - Any assignment group deletion → `GuardBlocked` (also not in the allowlist).
@@ -631,7 +634,8 @@ be read. Flags: `--confirm-grading-change` (GRADING_CHANGE, LATE_POLICY_REGRADE)
 `--confirm-access-removal` (ACCESS_REMOVED), `--confirm-notify` (NOTIFIES_STUDENTS).
 Hard blocks also cover: unpublishing an assignment that has submissions (Canvas
 refuses). Assignment groups are recognised by an `Operation` whose before/after
-object's class is named `AssignmentGroup`. Group-category and submission-type changes
+object's class is named `AssignmentGroup` (there is no `Kind` for groups; orx.4 **must**
+name its class exactly that and write `group_category` into `Operation.changes`). Group-category and submission-type changes
 are read from `Operation.changes` keys (`group_category`, `submission_types`).
 
 ## 11. Git, snapshots, blobs
