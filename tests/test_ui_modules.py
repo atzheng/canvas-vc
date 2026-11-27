@@ -39,6 +39,7 @@ FILES = {
     "assignments/hw1.md": "---\ntitle: HW1\ndue: 2026-10-02 23:59\n---\n\nbody\n",
     "files/lec/01.pdf": b"%PDF",
     "files/other.txt": b"x",
+    "announcements/news.md": "---\ntitle: News\n---\n\nhi\n",
 }
 
 
@@ -69,6 +70,7 @@ def test_not_in_any_module_matches_index(tmp_path: Path) -> None:
     assert "pages/loose.md" in tail and "files/other.txt" in tail
     assert "pages/intro.md" not in tail and "assignments/hw1.md" not in tail
     assert "files/lec/01.pdf" not in tail
+    assert "announcements/news.md" not in tail
 
 
 def _sub(tmp_path: Path) -> Path:

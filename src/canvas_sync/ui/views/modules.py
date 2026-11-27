@@ -150,8 +150,11 @@ def render(state: State, path: str, query: Mapping[str, list[str]]) -> Response:
     placed = {
         lk.target for links in idx.backlinks.values() for lk in links if lk.kind == "module_item"
     }
+    # announcements can never be module items, so they are not "missing" from a module
     loose = sorted(
-        k.path for k in course.objects if k.kind is not Kind.MODULE and k.path not in placed
+        k.path
+        for k in course.objects
+        if k.kind not in (Kind.MODULE, Kind.ANNOUNCEMENT) and k.path not in placed
     )
     body += "<h2>Not in any module</h2>"
     if loose:
