@@ -16,6 +16,7 @@ from canvas_sync.model.base import CanvasObject, Kind, ObjectKey
 from canvas_sync.model.course import Course
 from canvas_sync.model.files import FilesMeta
 from canvas_sync.model.roster import Roster, RosterCache
+from canvas_sync.progress import NullProgress, Progress
 from canvas_sync.remote import announcements, assignments, files, modules, pages, roster
 from canvas_sync.remote.context import FetchContext
 from canvas_sync.remote.http import CanvasClient
@@ -59,18 +60,26 @@ def _tree_paths(
     return tree, refs
 
 
-def fetch_course(client: CanvasClient, ctx: FetchContext, *, root: Path | None = None) -> Course:
+def fetch_course(
+    client: CanvasClient,
+    ctx: FetchContext,
+    *,
+    root: Path | None = None,
+    progress: Progress | None = None,
+) -> Course:
     """Read the whole course from Canvas (GET only) into a ``Course``.
 
     ``root`` (default: the blob store's repository) is where the untracked
     ``roster-aliases.yaml`` is read and ``.canvas/roster-cache.json`` written.
     """
     base = root if root is not None else ctx.blob_store.root
+    progress = progress or NullProgress()
+    progress.phase("roster")
     cache = roster.read(client, ctx, aliases=roster.load_aliases(base))
     roster.write_cache(base, cache)
     ctx = replace(ctx, roster=cache)
 
-    meta = files.read_files_meta(client, ctx)
+    meta = files.read_files_meta(client, ctx, progress=progress)
     tree, refs = _tree_paths(client, ctx, meta)
 
     objects: dict[ObjectKey, CanvasObject] = {}
@@ -81,8 +90,11 @@ def fetch_course(client: CanvasClient, ctx: FetchContext, *, root: Path | None =
         (Kind.ASSIGNMENT, assignments.read),
         (Kind.ANNOUNCEMENT, announcements.read),
     ):
+        progress.phase(kind.value + "s", sum(1 for k in tree if k[0] is kind))
         for path, obj in read(client, ctx, paths=tree).items():
             objects[ObjectKey(kind, path)] = obj
+            progress.advance(label=path)
+    progress.phase("modules")
     module_list = modules.read(client, ctx, paths=refs)
 
     tracked = ctx.previous.roster if ctx.previous is not None else _initial_roster(client, cache)

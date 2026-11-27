@@ -6,6 +6,7 @@ import tempfile
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Annotated
 
 import typer
 from pydantic import ValidationError as PydanticValidationError
@@ -18,6 +19,7 @@ from canvas_sync.ignore import IGNORE_FILE, IgnoreRules
 from canvas_sync.model.course import Course, dump_tree
 from canvas_sync.model.roster import RosterCache
 from canvas_sync.model.serialize import load_yaml
+from canvas_sync.progress import Progress, rich_progress
 from canvas_sync.remote import roster
 from canvas_sync.remote.context import FetchContext
 from canvas_sync.remote.fetch import fetch_course
@@ -74,7 +76,9 @@ def committed_inputs(root: Path, config: CourseConfig) -> tuple[CourseConfig, Ig
     return config, committed_ignore(root, head)
 
 
-def run_fetch(root: Path, client: CanvasClient, config: CourseConfig) -> FetchResult:
+def run_fetch(
+    root: Path, client: CanvasClient, config: CourseConfig, progress: Progress | None = None
+) -> FetchResult:
     """Download Canvas, commit the result to canvas/main (no commit if unchanged).
 
     Never touches the work tree or the user's index; the only files written outside git
@@ -95,7 +99,7 @@ def run_fetch(root: Path, client: CanvasClient, config: CourseConfig) -> FetchRe
         ignore=ignore,
         blob_store=BlobStore(root),
     )
-    course = fetch_course(client, ctx, root=root)
+    course = fetch_course(client, ctx, root=root, progress=progress)
     live = {k.path for k in course.objects}
     out = Bodies({p: r for p, r in bodies.entries.items() if p in live})
     changed = _changed(previous, course)
@@ -112,7 +116,9 @@ def report(result: FetchResult, console: Console | None = None) -> None:
         out.print(f"canvas/main: {result.changed} changed ({result.commit[:7]})", highlight=False)
 
 
-def fetch() -> None:
+def fetch(
+    quiet: Annotated[bool, typer.Option("--quiet", "-q", help="No progress display")] = False,
+) -> None:
     """Download the Canvas state and commit it to canvas/main."""
     try:
         root = gitops.repo_root(Path.cwd())
@@ -120,7 +126,9 @@ def fetch() -> None:
         with CanvasClient(
             str(config.canvas_url), get_token(config), course_id=config.course_id, mode="read"
         ) as client:
-            report(run_fetch(root, client, config))
+            with rich_progress(quiet) as progress:
+                result = run_fetch(root, client, config, progress)
+            report(result)
     except CanvasSyncError as e:
         Console(stderr=True).print(f"error: {e}", markup=False, highlight=False)
         raise typer.Exit(1) from None
