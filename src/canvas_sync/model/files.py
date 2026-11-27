@@ -18,6 +18,7 @@ are documented on ``glob_match``.
 
 from __future__ import annotations
 
+import hashlib
 import re
 import unicodedata
 from datetime import time
@@ -440,15 +441,46 @@ def render_files_meta(meta: FilesMeta) -> str:
     return dump_yaml(doc, KEY_ORDER) if doc else ""
 
 
+def _with_disk_hashes(meta: FilesMeta, root: Path) -> FilesMeta:
+    """Make ``meta`` reflect the actual bytes under ``files/``.
+
+    A file on disk gets ``sha256`` of its contents (overriding the recorded one, so an
+    edited file shows up as a change) and an entry if ``_meta.yaml`` has none (a new
+    file). Entries for files that are not on disk keep their recorded hash.
+    """
+    base = root / "files"
+    if not base.is_dir():
+        return meta
+    entries = dict(meta.files)
+    for f in sorted(base.rglob("*")):
+        if f.is_symlink() or not f.is_file() or f.name == ".DS_Store":
+            continue
+        rel = _nfc(f.relative_to(base).as_posix())
+        if rel == "_meta.yaml":
+            continue
+        key = _PREFIX + rel
+        sha = hashlib.sha256(f.read_bytes()).hexdigest()
+        old = entries.get(key)
+        entries[key] = (
+            FileEntry(path=rel, sha256=sha)
+            if old is None
+            else old.model_copy(update={"sha256": sha})
+        )
+    return meta.model_copy(update={"files": entries})
+
+
 class _Spec:
     kind = Kind.FILE
     folder = "files"
 
     def load_files_meta(self, root: Path, cfg: CourseConfig) -> FilesMeta:
         path = root / META_PATH
-        if not path.exists():
-            return FilesMeta()
-        return parse_files_meta(path.read_text(encoding="utf-8"), cfg)
+        meta = (
+            parse_files_meta(path.read_text(encoding="utf-8"), cfg)
+            if path.exists()
+            else FilesMeta()
+        )
+        return _with_disk_hashes(meta, root)
 
     def dump_files_meta(self, meta: FilesMeta, cfg: CourseConfig) -> dict[str, bytes]:
         text = render_files_meta(meta)

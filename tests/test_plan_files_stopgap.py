@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import hashlib
+from pathlib import Path
+
 import pytest
 
 from canvas_sync.config import CourseConfig
 from canvas_sync.errors import ValidationError
 from canvas_sync.model.base import CanvasObject, Kind, ObjectKey
-from canvas_sync.model.course import Course
+from canvas_sync.model.course import Course, load_tree
 from canvas_sync.model.files import parse_files_meta
 from canvas_sync.model.roster import Roster
 from canvas_sync.plan.core import diff
@@ -77,3 +80,46 @@ def test_settings_change_via_defaults_and_rules() -> None:
 def test_core_diff_raises_on_change() -> None:
     with pytest.raises(ValidationError):
         diff(course(META), course(META.replace("published: true", "published: false")))
+
+
+# --- detection from real bytes on disk (loader hashes files/) ---
+
+
+def _tree(tmp_path: Path, files: dict[str, bytes]) -> Course:
+    tmp_path.mkdir(parents=True)
+    (tmp_path / "course.yaml").write_text(
+        "canvas_url: https://canvas.test\ncourse_id: 101\ntimezone: America/Vancouver\n"
+    )
+    for rel, data in files.items():
+        p = tmp_path / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(data)
+    return load_tree(tmp_path)
+
+
+def test_disk_identical_clones(tmp_path: Path) -> None:
+    files = {"files/x.pdf": b"one", "files/sub/y.txt": b"two"}
+    a = _tree(tmp_path / "a", files)
+    b = _tree(tmp_path / "b", files)
+    assert diff(a, b).ops == []
+
+
+def test_disk_byte_replace_without_meta_edit(tmp_path: Path) -> None:
+    sha = hashlib.sha256(b"one").hexdigest()
+    meta = f'files:\n  x.pdf: {{canvas_id: 1, sha256: "{sha}"}}\n'.encode()
+    a = _tree(tmp_path / "a", {"files/x.pdf": b"one", "files/_meta.yaml": meta})
+    b = _tree(tmp_path / "b", {"files/x.pdf": b"ONE", "files/_meta.yaml": meta})
+    with pytest.raises(ValidationError) as e:
+        diff(a, b)
+    assert str(e.value) == f"files/x.pdf: {MSG}"
+
+
+def test_disk_new_file_without_meta_entry(tmp_path: Path) -> None:
+    a = _tree(tmp_path / "a", {"files/x.pdf": b"one"})
+    b = _tree(tmp_path / "b", {"files/x.pdf": b"one", "files/new.pdf": b"n"})
+    with pytest.raises(ValidationError) as e:
+        diff(a, b)
+    assert str(e.value) == f"files/new.pdf: {MSG}"
+    with pytest.raises(ValidationError) as e:
+        diff(b, a)  # deleted locally
+    assert str(e.value) == f"files/new.pdf: {MSG}"
