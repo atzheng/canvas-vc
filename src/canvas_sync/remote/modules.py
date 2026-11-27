@@ -14,8 +14,9 @@ from typing import Any
 
 from rich.console import Console
 
-from canvas_sync.dates import from_canvas
-from canvas_sync.model.base import CanvasObject, Kind
+from canvas_sync.dates import from_canvas, to_canvas
+from canvas_sync.errors import CanvasSyncError
+from canvas_sync.model.base import CanvasObject, Kind, ObjectKey
 from canvas_sync.model.modules import (
     CompletionRequirement,
     Module,
@@ -23,6 +24,7 @@ from canvas_sync.model.modules import (
     UnmanagedItem,
     UnmanagedRef,
 )
+from canvas_sync.plan.modules import PlacedItem, PlacedModule
 from canvas_sync.remote.context import ApplyContext, FetchContext
 from canvas_sync.remote.http import CanvasClient
 
@@ -188,18 +190,216 @@ def read(
     return modules
 
 
+# ---------------------------------------------------------------------------
+# Writers (POST/PUT/DELETE). Only managed fields are ever sent: never
+# prerequisites, completion requirements, sequential progress, or unmanaged items.
+# Bodies are JSON so that a cleared date is an explicit null.
+# ---------------------------------------------------------------------------
+
+_TYPES = {
+    "page": "Page",
+    "assignment": "Assignment",
+    "file": "File",
+    "header": "SubHeader",
+    "url": "ExternalUrl",
+    "quiz": "Quiz",
+    "discussion": "Discussion",
+}
+_KIND_BY_NAME = {"page": Kind.PAGE, "assignment": Kind.ASSIGNMENT, "file": Kind.FILE}
+
+
+def _modules_path(ctx: ApplyContext) -> str:
+    return f"/courses/{ctx.config.course_id}/modules"
+
+
+def _items_path(ctx: ApplyContext, module_id: int) -> str:
+    return f"{_modules_path(ctx)}/{module_id}/items"
+
+
+def _module_id(ctx: ApplyContext, path: str, known: int | None) -> int:
+    if known is not None:
+        return known
+    new = ctx.ids.get(ObjectKey(Kind.MODULE, path))
+    if not isinstance(new, int):
+        raise CanvasSyncError(f"{path}: the module this item belongs to has no Canvas id yet")
+    return new
+
+
+def _position_after(
+    client: CanvasClient,
+    ctx: ApplyContext,
+    list_path: str,
+    placed: PlacedModule | PlacedItem,
+    moving: int | None,
+) -> int | None:
+    """1-based position that puts ``moving`` right after the predecessor in the live list.
+
+    Only relative order matters: deletes run last, so the live list may still hold items
+    that are about to go. ``None`` (append) when the predecessor cannot be found.
+    """
+    if not placed.place:
+        return None
+    pred = placed.pred_id
+    if pred is None and placed.pred_path is not None:
+        new = ctx.ids.get(ObjectKey(Kind.MODULE, placed.pred_path))
+        pred = new if isinstance(new, int) else None
+        if pred is None:
+            return None
+    if pred is None:
+        return 1
+    rows: list[dict[str, Any]] = client.get(list_path, _PER_PAGE)
+    ids = [int(r["id"]) for r in sorted(rows, key=_position)]
+    if pred not in ids:
+        return None
+    at = ids.index(pred) + 1
+    if moving is not None and moving in ids and ids.index(moving) < ids.index(pred):
+        return at
+    return at + 1
+
+
+def _module_body(before: Module | None, after: Module) -> dict[str, Any]:
+    body: dict[str, Any] = {}
+    if before is None or after.name != before.name:
+        body["name"] = after.name
+    if after.unlock != (before.unlock if before is not None else None):
+        body["unlock_at"] = to_canvas(after.unlock)  # None -> explicit null
+    return body
+
+
+def _create_module(client: CanvasClient, obj: Module, ctx: ApplyContext) -> int:
+    body = _module_body(None, obj)
+    if isinstance(obj, PlacedModule):
+        pos = _position_after(client, ctx, _modules_path(ctx), obj, None)
+        if pos is not None:
+            body["position"] = pos
+    row = client.post(_modules_path(ctx), json={"module": body})
+    mid = int(row["id"])
+    if obj.published:  # new modules start unpublished; publishing is a separate update
+        client.put(f"{_modules_path(ctx)}/{mid}", json={"module": {"published": True}})
+    return mid
+
+
+def _update_module(client: CanvasClient, before: Module, after: Module, ctx: ApplyContext) -> None:
+    mid = before.canvas_id
+    if mid is None:
+        raise CanvasSyncError(f"modules.yaml#{before.name}: module has no Canvas id")
+    body = _module_body(before, after)
+    if after.published is not None and after.published != before.published:
+        body["published"] = after.published
+    if isinstance(after, PlacedModule):
+        pos = _position_after(client, ctx, _modules_path(ctx), after, mid)
+        if pos is not None:
+            body["position"] = pos
+    if body:
+        client.put(f"{_modules_path(ctx)}/{mid}", json={"module": body})
+
+
+def _content_id(ctx: ApplyContext, item: PlacedItem) -> int | str:
+    if item.content_id is not None:
+        return item.content_id
+    if item.content_path is not None:
+        new = ctx.ids.get(ObjectKey(_KIND_BY_NAME[item.item_type], item.content_path))
+        if new is not None:
+            return new
+    raise CanvasSyncError(
+        f"{item.module_path}: {item.item_type} {getattr(item, item.item_type)!r} "
+        "has no Canvas id yet (was it created earlier in this push?)"
+    )
+
+
+def _create_item(client: CanvasClient, obj: PlacedItem, ctx: ApplyContext) -> int:
+    mid = _module_id(ctx, obj.module_path, obj.module_id)
+    typ = obj.item_type
+    body: dict[str, Any] = {"type": _TYPES[typ], "indent": obj.indent}
+    if typ == "page":
+        body["page_url"] = str(_content_id(ctx, obj))
+    elif typ == "header":
+        body["title"] = obj.header
+    elif typ == "url":
+        body["external_url"] = obj.url
+        body["title"] = obj.title or obj.url
+        body["new_tab"] = obj.new_tab
+    else:  # assignment, file, quiz, discussion
+        body["content_id"] = _content_id(ctx, obj)
+    if obj.title and typ in ("file", "quiz", "discussion"):
+        body["title"] = obj.title
+    pos = _position_after(client, ctx, _items_path(ctx, mid), obj, None)
+    if pos is not None:
+        body["position"] = pos
+    row = client.post(_items_path(ctx, mid), json={"module_item": body})
+    new_id = int(row["id"])
+    if obj.published is not None:
+        client.put(
+            f"{_items_path(ctx, mid)}/{new_id}",
+            json={"module_item": {"published": obj.published}},
+        )
+    return new_id
+
+
+def _update_item(
+    client: CanvasClient, before: PlacedItem, after: PlacedItem, ctx: ApplyContext
+) -> None:
+    item_id = before.canvas_id
+    if item_id is None:
+        raise CanvasSyncError(f"{after.module_path}: module item has no Canvas id")
+    target = _module_id(ctx, after.module_path, after.module_id)
+    current = after.from_module_id if after.from_module_id is not None else target
+    typ = after.item_type
+    body: dict[str, Any] = {}
+    if typ == "header" and after.header != before.header:
+        body["title"] = after.header
+    if typ == "url":
+        if after.url != before.url:
+            body["external_url"] = after.url
+        if after.new_tab != before.new_tab:
+            body["new_tab"] = after.new_tab
+    if typ in ("file", "url", "quiz", "discussion") and after.title not in (None, before.title):
+        body["title"] = after.title
+    if after.indent != before.indent:
+        body["indent"] = after.indent
+    if after.published is not None and after.published != before.published:
+        body["published"] = after.published
+    if target != current:
+        body["module_id"] = target
+    pos = _position_after(client, ctx, _items_path(ctx, target), after, item_id)
+    if pos is not None:
+        body["position"] = pos
+    if body:
+        client.put(f"{_items_path(ctx, current)}/{item_id}", json={"module_item": body})
+
+
 def create(client: CanvasClient, obj: CanvasObject, ctx: ApplyContext) -> int | str:
-    """Returns the new canvas_id."""
-    raise NotImplementedError
+    """Returns the new canvas_id (of the module, or of the module item)."""
+    if isinstance(obj, PlacedItem):
+        return _create_item(client, obj, ctx)
+    if isinstance(obj, Module):
+        return _create_module(client, obj, ctx)
+    raise TypeError(f"modules writer got {type(obj).__name__}")
 
 
 def update(
     client: CanvasClient, before: CanvasObject, after: CanvasObject, ctx: ApplyContext
 ) -> None:
     """Only changed fields are sent."""
-    raise NotImplementedError
+    if isinstance(before, PlacedItem) and isinstance(after, PlacedItem):
+        _update_item(client, before, after, ctx)
+    elif isinstance(before, Module) and isinstance(after, Module):
+        _update_module(client, before, after, ctx)
+    else:
+        raise TypeError(f"modules writer got {type(before).__name__} -> {type(after).__name__}")
 
 
 def delete(client: CanvasClient, obj: CanvasObject, ctx: ApplyContext) -> None:
-    """Goes through the submission guard."""
-    raise NotImplementedError
+    """Module or item delete. Operations that touch an assignment item are routed through
+    the submission guard by ``apply`` (``Operation.touches_assignment``)."""
+    if isinstance(obj, PlacedItem):
+        mid = _module_id(ctx, obj.module_path, obj.module_id)
+        if obj.canvas_id is None:
+            raise CanvasSyncError(f"{obj.module_path}: module item has no Canvas id")
+        client.delete(f"{_items_path(ctx, mid)}/{obj.canvas_id}")
+    elif isinstance(obj, Module):
+        if obj.canvas_id is None:
+            raise CanvasSyncError(f"modules.yaml#{obj.name}: module has no Canvas id")
+        client.delete(f"{_modules_path(ctx)}/{obj.canvas_id}")
+    else:
+        raise TypeError(f"modules writer got {type(obj).__name__}")
