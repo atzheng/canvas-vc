@@ -44,6 +44,7 @@ src/canvas_sync/
   gitops.py                    git plumbing                               (§11)
   snapshot.py                  Course -> commit on canvas/main            (§11)
   ignore.py                    .canvasignore matching                     (§11)
+  progress.py                  Progress protocol, NullProgress, rich renderer (§1a)
   ui/                          read-only explorer, `canvas ui`            (§13, UI.md)
     server.py layout.py state.py index.py
     views/overview.py modules.py objects.py timeline.py files.py changes.py
@@ -71,6 +72,26 @@ runtime dependencies without giving a reason in the PR body.
 
 Quality gate (every PR): `uv run pytest && uv run ruff check && uv run ruff
 format --check && uv run pyright`.
+
+### 1a. Progress (`progress.py`)
+
+```python
+class Progress(Protocol):
+    def phase(self, name: str, total: int | None = None) -> None   # starts a phase; ends the previous
+    def advance(self, n: int = 1, label: str | None = None) -> None
+    def bytes(self, done: int, total: int) -> None                 # cumulative, current phase
+class NullProgress: ...                                            # the default; does nothing
+class RichProgress: ...                                            # context manager, rich bars
+def rich_progress(quiet: bool = False) -> ContextManager[Progress] # RichProgress on stderr if it is
+                                                                   # a TTY and not quiet, else NullProgress
+```
+
+Reporting only: a producer never changes requests, order or results because of it.
+`fetch_course` / `files.read_files_meta` take `progress=`; phases in order: `roster`,
+`files` (total = files listed; `bytes` totals the listed sizes, advanced per file whether
+downloaded or cached), `pages`, `assignments`, `announcements` (total = objects in the
+id/path map), `modules`. `fetch` and `pull` take `--quiet`. Push (vtr.5) passes the same
+object to `apply()`.
 
 ## 2. Repository a user edits (the "course tree")
 
@@ -535,7 +556,8 @@ file I/O; `fetch_course` calls `write_cache(root, cache)` / `load_cache(root)`
 `remote/fetch.py`:
 
 ```python
-def fetch_course(client: CanvasClient, ctx: FetchContext) -> Course
+def fetch_course(client: CanvasClient, ctx: FetchContext, *, root: Path | None = None,
+                 progress: Progress | None = None) -> Course
 ```
 
 calls roster → files → pages → assignments → announcements → modules (files

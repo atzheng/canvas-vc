@@ -26,6 +26,7 @@ from canvas_sync.dates import from_canvas
 from canvas_sync.errors import CanvasAPIError
 from canvas_sync.model.base import CanvasObject
 from canvas_sync.model.files import FileEntry, FileSettings, FilesMeta
+from canvas_sync.progress import NullProgress, Progress
 from canvas_sync.remote.context import ApplyContext, FetchContext
 from canvas_sync.remote.http import CanvasClient
 
@@ -225,12 +226,19 @@ def _match_previous(
     return matched
 
 
-def read_files_meta(client: CanvasClient, ctx: FetchContext) -> FilesMeta:
+def read_files_meta(
+    client: CanvasClient, ctx: FetchContext, *, progress: Progress | None = None
+) -> FilesMeta:
     """Remote files as a ``FilesMeta``: defaults and rules are carried over from
     ``ctx.previous`` (people edit those); ``files`` holds only ids, hashes,
     ``stable_link`` and the settings that differ from what the rules give."""
     prev_meta = ctx.previous.files_meta if ctx.previous else FilesMeta()
+    progress = progress or NullProgress()
+    progress.phase("files")
     remote, ignored_ids = _list_remote(client, ctx)
+    progress.phase("files", len(remote))
+    total_bytes = sum(int(r.data.get("size") or 0) for r in remote)
+    done_bytes = 0
     matched = _match_previous(client, remote, prev_meta.files)
     index_file = _index_path(ctx)
     index = _load_index(index_file)
@@ -258,6 +266,9 @@ def read_files_meta(client: CanvasClient, ctx: FetchContext) -> FilesMeta:
             url = r.data.get("url") or f"{client.base_url}/files/{fid}/download"
             sha = ctx.blob_store.put(client.download(str(url)))
         new_index[str(fid)] = {**stamp, "sha256": sha}
+        done_bytes += int(r.data.get("size") or 0)
+        progress.bytes(done_bytes, total_bytes)
+        progress.advance(label=r.path)
         overrides = fold_settings(_remote_settings(r.data, ctx), base_meta.rule_settings(r.path))
         files[r.path] = FileEntry(
             canvas_id=fid,

@@ -12,6 +12,7 @@ from canvas_sync import gitops
 from canvas_sync.commands.fetch import report, run_fetch
 from canvas_sync.config import get_token, load_config
 from canvas_sync.errors import CanvasSyncError
+from canvas_sync.progress import rich_progress
 from canvas_sync.remote.http import CanvasClient
 
 
@@ -60,6 +61,7 @@ def merge_canvas(root: Path, rebase: bool, console: Console) -> bool:
 
 
 def pull(
+    quiet: Annotated[bool, typer.Option("--quiet", "-q", help="No progress display")] = False,
     rebase: Annotated[bool, typer.Option("--rebase", help="Rebase instead of merge")] = False,
 ) -> None:
     """Fetch, then merge (or rebase onto) canvas/main."""
@@ -69,7 +71,9 @@ def pull(
         with CanvasClient(
             str(config.canvas_url), get_token(config), course_id=config.course_id, mode="read"
         ) as client:
-            report(run_fetch(root, client, config))
+            with rich_progress(quiet) as progress:
+                result = run_fetch(root, client, config, progress)
+            report(result)
         if not merge_canvas(root, rebase, Console()):
             raise typer.Exit(1)
     except CanvasSyncError as e:
