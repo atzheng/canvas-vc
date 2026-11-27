@@ -529,6 +529,41 @@ by `.canvasignore` are dropped. Tree paths for new remote objects: `slugify(titl
 with `-2`, `-3`, ... on collision. Existing objects keep their path from
 `previous` (matched by `canvas_id`).
 
+**Pages and announcements readers** (`remote/pages.py`, `remote/announcements.py`;
+helpers in `remote/paths.py`). GET only.
+
+```python
+def read(client, ctx, *, paths: Mapping[tuple[Kind, int | str], str] | None = None) -> dict[str, CanvasObject]
+def assign_paths(client, ctx) -> dict[str, str]   # pages: url slug -> tree path (list + rename probes, no bodies)
+def assign_paths(client, ctx) -> dict[int, str]   # announcements and assignments: id -> tree path (one list call)
+```
+
+- `paths` has the same type and keys as `modules.read` (pages by url slug, assignments,
+  files and announcements by id; value = tree path). `fetch_course` does an id/path
+  pre-pass (list calls only; `assign_paths` in `pages`, `announcements` and `assignments`) and passes
+  the same complete map to every reader. When given, links in bodies resolve through it
+  alone. When `None`, they resolve through `ctx.previous` plus the objects of the kind
+  being read; previous objects of that kind that no longer exist remotely are dropped.
+- `read` returns objects keyed by tree path (it must choose paths to give `html_to_md` a
+  link context). `Page.canvas_id` is the current Canvas url slug; there is no `page_id`.
+- Path assignment: objects in `ctx.previous` keep their path, matched by `canvas_id`.
+  Pages whose slug is gone are matched through Canvas's old-slug redirect and `page_id`.
+  New objects (ascending Canvas id) get `<folder>/<slugify(title)>.md`, then `-2`, `-3`
+  on collision with already assigned paths (compared case-insensitively). Only
+  matched objects see their previous body and `body_format`; new ones never do.
+- **Known limitation:** if page A is renamed and a new page B takes A's old slug, the
+  slug match pairs the previous A with B. Needs a stored `page_id` to detect.
+- `slugify(title)`: NFKD, drop non-ASCII, lowercase, runs of non-alphanumerics become `-`,
+  strip `-`, first 80 characters, strip `-` again, `untitled` if empty (one rule for pages,
+  assignments and announcements, all through `remote/paths.py`;
+  `unique_path(folder, title, taken)` adds the suffix).
+- `previous_objects(ctx, kind)`: tree path -> previous object of that kind.
+  `link_context(ctx, from_path, read, paths=None)` builds the `LinkContext`.
+  `read_body(...)`: previous object with `body_format: html` keeps the HTML verbatim;
+  else if `ctx.bodies.matches(path, html)` (Bodies are keyed by tree path) the previous
+  Markdown is reused; else an empty body is `""`; else `html_to_md`. Results go through
+  `normalize_body`.
+
 ## 9. Plan and apply
 
 ```python

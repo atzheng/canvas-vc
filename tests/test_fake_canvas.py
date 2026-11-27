@@ -124,23 +124,23 @@ def test_write_off_allowlist_never_reaches_fake(fake: FakeCanvas) -> None:
 
 
 def test_resource_modules_can_plug_in_routes(fake: FakeCanvas) -> None:
-    pages = fake.state("pages")
+    topics = fake.state("scratch")
 
     def create(q: Req) -> dict[str, str]:
-        page = {"url": "hello", "body": fake.sanitize(str(q.body["wiki_page"]["body"]))}
-        pages["hello"] = page
-        return page
+        topic = {"id": "7", "message": fake.sanitize(str(q.body["message"]))}
+        topics["7"] = topic
+        return topic
 
     def get(q: Req) -> object:
-        if q.match.group(1) not in pages:
+        if q.match.group(1) not in topics:
             raise CanvasError(404, "missing")
-        return pages[q.match.group(1)]
+        return topics[q.match.group(1)]
 
-    fake.route("POST", r"/courses/{c}/pages", create)
-    fake.route("GET", r"/courses/{c}/pages/([^/]+)", get)
+    fake.route("POST", r"/courses/{c}/discussion_topics", create)
+    fake.route("GET", r"/courses/{c}/discussion_topics/(\d+)", get)
     client = fake.client("write")
-    client.post(f"/courses/{C}/pages", json={"wiki_page": {"body": "<p>Hi<br></p>"}})
-    assert client.get_one(f"/courses/{C}/pages/hello")["body"] == "<p>Hi<br /></p>\n"
+    client.post(f"/courses/{C}/discussion_topics", json={"message": "<p>Hi<br></p>"})
+    assert client.get_one(f"/courses/{C}/discussion_topics/7")["message"] == "<p>Hi<br /></p>\n"
 
 
 def test_sanitizer_is_stable_and_not_identity() -> None:
