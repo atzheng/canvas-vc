@@ -10,7 +10,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 from canvas_sync.ui.layout import Response, error_page, not_found
 from canvas_sync.ui.state import State
-from canvas_sync.ui.views import overview, timeline
+from canvas_sync.ui.views import changes, files, overview, timeline
 
 Render = Callable[[State, str, Mapping[str, list[str]]], Response]
 
@@ -18,6 +18,8 @@ Render = Callable[[State, str, Mapping[str, list[str]]], Response]
 ROUTES: dict[str, Render] = {
     "/": overview.render,
     "/timeline": timeline.render,
+    "/changes": changes.render,
+    "/files": files.render,
 }
 
 
