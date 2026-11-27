@@ -140,5 +140,9 @@ def from_canvas_url(url: str, ctx: LinkContext) -> str | None:
     frag = f"#{parts.fragment}" if parts.fragment else ""
     query = parts.query
     if kind is Kind.FILE and extra != ["preview"]:
-        query = "&".join(q for q in query.split("&") if q and q != "wrap=1")
+        # ``verifier`` is minted by Canvas (a fresh one whenever it rewrites a link after a
+        # file replacement), never written by a person: keep it out of the Markdown.
+        query = "&".join(
+            q for q in query.split("&") if q and q != "wrap=1" and not q.startswith("verifier=")
+        )
     return quote(rel, safe="/._-~") + (f"?{query}" if query else "") + frag
