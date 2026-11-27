@@ -347,6 +347,17 @@ has no canvas_id yet (needs `ctx.exists`). Push renders again after creating
 new objects, so unresolved links get filled in. Links are also rewritten in
 raw HTML `<a href>` / `<img src>`.
 
+`html_to_md` is pinned to **pandoc 3.5** (`-f html -t gfm --wrap=none --eol=lf`,
+default extensions); it emits a `RuntimeWarning` when the installed pandoc's
+major.minor differs, and a test fails on drift. A different pandoc can convert
+the same HTML differently and cause spurious diffs; changing the pin needs the
+same re-baseline as pygments. Known lossy conversions (HTML edited in Canvas,
+then fetched): pandoc drops `text-align` and `padding-left` styles on
+paragraphs/headings (RCE centering and indent are lost on the next push),
+spacer `<p>&nbsp;</p>`, code-block languages, and runs of `<br>` become a
+paragraph break. Use `body_format: html` for pages that depend on these.
+`/files/ID/download?wrap=1` links lose `wrap=1` like the plain file form.
+
 Pinned `pygments>=2.21,<2.22`: code blocks use inline styles, which feed the
 `.canvas/bodies.json` hashes, so changing the pygments version requires a body
 re-baseline (re-render and re-record all bodies).

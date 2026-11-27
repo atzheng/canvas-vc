@@ -160,6 +160,10 @@ tree. Otherwise every fetch creates false conflicts. Rules:
     contains `html→markdown(remote HTML)` using pandoc with a fixed
     configuration, keeping anything it can't express as raw HTML blocks. The
     diff against your Markdown shows up as a normal change or conflict.
+  - Lossy on that path: pandoc drops paragraph `text-align`/`padding-left`
+    styles (Rich Content Editor centering and indentation), empty spacer
+    paragraphs and code-block languages. Pages that need them should use
+    `body_format: html`. The pandoc version is pinned (3.5); a mismatch warns.
   - Requirement, enforced by tests: `md→html→md` is idempotent after one round
     trip, so the same content doesn't keep flipping between two forms.
   - Escape hatch: `body_format: html` in the frontmatter keeps the body as
