@@ -13,6 +13,11 @@ refused (the tool must never replace the whole override set), as is unpublishing
 with submissions (Canvas answers 400). ``DELETE`` removes only the assignment record:
 ``fake.submissions`` is never touched here (real Canvas soft-deletes them, which the tool must
 never cause), so tests assert on ``fake.log`` that no DELETE reached such an assignment.
+Override writes: ``POST /assignments/:a/overrides`` and ``PUT/DELETE .../overrides/:id`` with a
+body ``{"assignment_override": {...}}``: one of ``course_section_id`` / ``group_id`` /
+``student_ids``, ``title`` (ad hoc sets default to "N students"), ``due_at`` / ``unlock_at`` /
+``lock_at``. A section or group may be in only one override per assignment (400), as may a
+student; a PUT replaces ``student_ids`` wholesale and cannot change the audience kind.
 ``set_late_policy`` seeds ``GET /late_policy``.
 """
 
@@ -211,6 +216,76 @@ def register(fake: FakeCanvas) -> None:
             raise not_found()
         return {"late_policy": lp}
 
+    def override_body(q: Req) -> dict[str, Any]:
+        body = q.body.get("assignment_override")
+        if not isinstance(body, dict):
+            raise FakeCanvasError("override body must be {'assignment_override': {...}}")
+        body = dict(body)  # pyright: ignore[reportUnknownArgumentType]
+        known = {
+            "course_section_id", "group_id", "student_ids", "title",
+            "due_at", "unlock_at", "lock_at",
+        }  # fmt: skip
+        if set(body) - known:
+            raise FakeCanvasError(
+                f"fake does not model override fields {sorted(set(body) - known)}"
+            )
+        return body
+
+    def clash(aid: int, body: dict[str, Any], skip: int | None) -> None:
+        for o in _store(fake)["overrides"].get(aid, []):
+            if o["id"] == skip:
+                continue
+            for key in ("course_section_id", "group_id"):
+                if body.get(key) is not None and o.get(key) == body[key]:
+                    raise CanvasError(400, "that audience already has an override")
+            if set(body.get("student_ids") or []) & set(o.get("student_ids") or []):
+                raise CanvasError(400, "a student is already in another override")
+
+    def create_override(q: Req) -> dict[str, Any]:
+        aid = int(q.match.group(1))
+        if aid not in _store(fake)["assignments"]:
+            raise not_found()
+        body = override_body(q)
+        targets = [k for k in ("course_section_id", "group_id", "student_ids") if body.get(k)]
+        if len(targets) != 1:
+            raise CanvasError(400, "exactly one of section, group or students is required")
+        clash(aid, body, None)
+        if "student_ids" in body:
+            body.setdefault("title", f"{len(body['student_ids'])} students")
+        else:
+            body.setdefault("title", "section" if "course_section_id" in body else "group")
+        return add_override(fake, aid, **body)
+
+    def find_override(q: Req) -> dict[str, Any]:
+        aid, oid = int(q.match.group(1)), int(q.match.group(2))
+        for o in _store(fake)["overrides"].get(aid, []):
+            if o["id"] == oid:
+                return o
+        raise not_found()
+
+    def put_override(q: Req) -> dict[str, Any]:
+        o = find_override(q)
+        body = override_body(q)
+        if ("student_ids" in body) != ("student_ids" in o):
+            raise CanvasError(400, "cannot change the audience of an override")
+        if o.get("noop_id"):
+            raise FakeCanvasError("the tool must never touch a mastery-path override")
+        clash(o["assignment_id"], body, o["id"])
+        o.update(body)
+        return dict(o)
+
+    def delete_override(q: Req) -> dict[str, Any]:
+        o = find_override(q)
+        if o.get("noop_id"):
+            raise FakeCanvasError("the tool must never touch a mastery-path override")
+        rows = _store(fake)["overrides"][o["assignment_id"]]
+        rows.remove(o)
+        _store(fake)["assignments"][o["assignment_id"]]["has_overrides"] = bool(rows)
+        return dict(o)
+
+    fake.route("POST", r"/courses/{c}/assignments/(\d+)/overrides", create_override)
+    fake.route("PUT", r"/courses/{c}/assignments/(\d+)/overrides/(\d+)", put_override)
+    fake.route("DELETE", r"/courses/{c}/assignments/(\d+)/overrides/(\d+)", delete_override)
     fake.route("POST", r"/courses/{c}/assignments", create)
     fake.route("PUT", r"/courses/{c}/assignments/(\d+)", put)
     fake.route("DELETE", r"/courses/{c}/assignments/(\d+)", delete)

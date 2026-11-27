@@ -2,8 +2,11 @@
 
 Writer: ``create`` / ``update`` / ``delete`` for assignments and (create only) assignment groups.
 Updates send only the fields that changed; assignment POST/PUT bodies never contain
-``assignment_overrides`` (Canvas replaces the whole override set with it). Override writes are
-orx.9's job, see ``_require_no_override_change``.
+``assignment_overrides`` (Canvas replaces the whole override set with it). Overrides are
+written one call each (``POST/PUT/DELETE .../overrides``) from ``plan.diff_overrides``, matched
+to the live overrides by target; mastery-path (``noop_id``) overrides are never touched.
+Names resolve to ids through ``ctx.roster`` (``unknown:<id>`` refs carry their id) and an
+unresolvable name refuses the assignment's operation before its first write.
 
 Reader (GET only): assignments with their group name, overrides resolved through the
 ``RosterCache`` to section/group names and student refs, and bodies as for pages
@@ -15,23 +18,23 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any, Literal, cast
 
 from pydantic import ValidationError as PydanticValidationError
 from rich.console import Console
 
 from canvas_sync.dates import from_canvas, to_canvas
-from canvas_sync.errors import CanvasSyncError, GuardBlocked, ValidationError
+from canvas_sync.errors import GuardBlocked, ValidationError
 from canvas_sync.model.assignment import Assignment
 from canvas_sync.model.base import CanvasObject, Kind, ObjectKey
 from canvas_sync.model.overrides import Override, validate_overrides
 from canvas_sync.plan.assignments import (
-    OVERRIDE_FIELDS,
-    OVERRIDE_REFUSAL,
     AssignmentGroup,
+    OverrideChange,
     assignment_changes,
+    diff_overrides,
     group_key,
-    override_change,
 )
 from canvas_sync.plan.core import Action, Operation
 from canvas_sync.remote.context import ApplyContext, FetchContext
@@ -368,6 +371,8 @@ def _fields(
         out["omit_from_final_grade"] = a.omit_from_final_grade
     if "published" in names and a.published is not None:
         out["published"] = a.published
+    if "assign_to_overrides_only" in names:
+        out["only_visible_to_overrides"] = a.assign_to_overrides_only
     for local, remote in (("unlock", "unlock_at"), ("due", "due_at"), ("lock", "lock_at")):
         if local in names:
             out[remote] = to_canvas(getattr(a, local))
@@ -376,18 +381,168 @@ def _fields(
     return out
 
 
-def _require_no_override_change(before: Assignment | None, after: Assignment) -> None:
-    """HOOK (orx.9): override writes go here.
+_UNKNOWN = "unknown:"
 
-    Override changes arrive on the assignment's own operation (``changes["overrides"]`` and
-    ``["assign_to_overrides_only"]``). orx.9 replaces this with a real writer that runs after
-    the assignment write, using the per-override endpoints (``POST .../overrides``,
-    ``PUT/DELETE .../overrides/<id>``). It must never put ``assignment_overrides`` in an
-    assignment body: Canvas would replace the whole set, including mastery-path overrides the
-    reader does not mirror. Until then a change is refused *before* anything is written.
-    """
-    if override_change(before, after):  # second line of defence: the differ refuses first
-        raise CanvasSyncError(OVERRIDE_REFUSAL.format(path=repr(after.title)))
+
+@dataclass(frozen=True)
+class _Target:
+    """An override audience in Canvas ids: ("section"|"group", {id}) or ("students", ids)."""
+
+    kind: str
+    ids: frozenset[int]
+
+
+def _unknown_id(ref: str) -> int | None:
+    if ref.startswith(_UNKNOWN) and ref[len(_UNKNOWN) :].isdigit():
+        return int(ref[len(_UNKNOWN) :])
+    return None
+
+
+def _resolve(o: Override, ctx: ApplyContext, path: str) -> _Target:
+    """Canvas ids for an override's target; ValidationError (no student names) if any is unknown."""
+    if o.students is not None:
+        ids: set[int] = set()
+        missing = 0
+        for ref in o.students:
+            uid = _unknown_id(ref) or ctx.roster.students.get(ref)
+            if uid is None:
+                missing += 1
+            else:
+                ids.add(uid)
+        if missing:
+            raise ValidationError(
+                f"{path}: {missing} student(s) in an override are not in the roster cache; "
+                "run canvas fetch"
+            )
+        return _Target("students", frozenset(ids))
+    kind, name = ("section", o.section) if o.section is not None else ("group", o.group)
+    assert name is not None
+    table = ctx.roster.sections if kind == "section" else ctx.roster.groups
+    oid = _unknown_id(name) or table.get(name)
+    if oid is None:
+        raise ValidationError(f"{path}: unknown {kind} {name!r} in an override; run canvas fetch")
+    return _Target(kind, frozenset({oid}))
+
+
+def _live_target(raw: dict[str, Any]) -> _Target | None:
+    ids = {n for n in map(_int, _list(raw.get("student_ids"))) if n is not None}
+    if ids:
+        return _Target("students", frozenset(ids))
+    for kind, key in (("group", "group_id"), ("section", "course_section_id")):
+        n = _int(raw.get(key))
+        if n is not None:
+            return _Target(kind, frozenset({n}))
+    return None
+
+
+@dataclass(frozen=True)
+class _Step:
+    method: Literal["POST", "PUT", "DELETE"]
+    override_id: int | None
+    body: dict[str, Any] | None
+
+
+def _override_body(o: Override, target: _Target, *, create: bool) -> dict[str, Any]:
+    """Every date is stated (a cleared one is an explicit null); a section or group id only on
+    create (an override cannot change its audience)."""
+    body: dict[str, Any] = {
+        "unlock_at": to_canvas(o.unlock),
+        "due_at": to_canvas(o.due),
+        "lock_at": to_canvas(o.lock),
+    }
+    if target.kind == "students":
+        body["student_ids"] = sorted(target.ids)
+        if o.title:
+            body["title"] = o.title
+    elif create:
+        body["course_section_id" if target.kind == "section" else "group_id"] = next(
+            iter(target.ids)
+        )
+    return body
+
+
+def _plan_override_writes(
+    client: CanvasClient,
+    ctx: ApplyContext,
+    aid: int | None,
+    changes: list[OverrideChange],
+    path: str,
+) -> list[_Step]:
+    """Read-only: resolve names and match the changes to live overrides. Raises before any
+    write if a name is unknown. ``aid`` is None for an assignment that does not exist yet."""
+    resolved = [
+        (
+            c,
+            _resolve(c.before, ctx, path) if c.before is not None else None,
+            _resolve(c.after, ctx, path) if c.after is not None else None,
+        )
+        for c in changes
+    ]
+    live: list[tuple[int, dict[str, Any], _Target]] = []
+    if aid is not None and changes:
+        rows: list[dict[str, Any]] = client.get(
+            f"/courses/{ctx.config.course_id}/assignments/{aid}/overrides", _PER_PAGE
+        )
+        for raw in rows:
+            lt = None if raw.get("noop_id") else _live_target(raw)  # mastery paths: untouched
+            if lt is not None and _int(raw.get("id")) is not None:
+                live.append((int(raw["id"]), raw, lt))
+
+    def find(old: _Target, title: str | None) -> int | None:
+        for oid, _, lt in live:
+            if lt == old:
+                return oid
+        if old.kind == "students" and title:  # membership drifted on Canvas: match by title
+            hits = [
+                oid for oid, raw, lt in live if lt.kind == "students" and raw.get("title") == title
+            ]
+            if len(hits) == 1:
+                return hits[0]
+        return None
+
+    steps: list[_Step] = []
+    for c, old, new in resolved:
+        if c.kind == "remove" and old is not None and c.before is not None:
+            oid = find(old, c.before.title)
+            if oid is not None:  # already gone on Canvas: nothing to do
+                steps.append(_Step("DELETE", oid, None))
+        elif c.after is not None and new is not None:
+            oid = find(old, c.before.title if c.before else None) if old else find(new, None)
+            if oid is None:
+                steps.append(_Step("POST", None, _override_body(c.after, new, create=True)))
+            else:
+                steps.append(_Step("PUT", oid, _override_body(c.after, new, create=False)))
+    return steps
+
+
+def _run_override_steps(
+    client: CanvasClient, ctx: ApplyContext, aid: int, steps: list[_Step]
+) -> None:
+    base = f"/courses/{ctx.config.course_id}/assignments/{aid}/overrides"
+    for step in steps:
+        if step.method == "DELETE":
+            client.delete(f"{base}/{step.override_id}")
+        elif step.method == "PUT":
+            client.put(f"{base}/{step.override_id}", json={"assignment_override": step.body})
+        else:
+            client.post(base, json={"assignment_override": step.body})
+
+
+def preflight(
+    client: CanvasClient, before: CanvasObject | None, after: CanvasObject, ctx: ApplyContext
+) -> None:
+    """Read-only, called by apply before any write: refuse an override that names an unknown
+    section, group or student (so a push never half-applies)."""
+    if not isinstance(after, Assignment):
+        return
+    old = before if isinstance(before, Assignment) else None
+    if old is not None and old.overrides == after.overrides:
+        return
+    where = f"assignment {after.title!r}"
+    aid = old.canvas_id if old is not None and isinstance(old.canvas_id, int) else None
+    _plan_override_writes(
+        client, ctx, aid, diff_overrides(old.overrides if old else [], after.overrides), where
+    )
 
 
 def create(client: CanvasClient, obj: CanvasObject, ctx: ApplyContext) -> int | str:
@@ -403,7 +558,10 @@ def create(client: CanvasClient, obj: CanvasObject, ctx: ApplyContext) -> int | 
         made = client.post(f"/courses/{course}/assignment_groups", json={"name": obj.name})
         return int(made["id"])
     a = _asg(obj)
-    _require_no_override_change(None, a)
+    # Resolve every override name first: nothing is written if one is unknown.
+    steps = _plan_override_writes(
+        client, ctx, None, diff_overrides([], a.overrides), f"assignment {a.title!r}"
+    )
     names = {"title", "grading_type", "omit_from_final_grade"}
     if a.points is not None:
         names.add("points")
@@ -416,23 +574,42 @@ def create(client: CanvasClient, obj: CanvasObject, ctx: ApplyContext) -> int | 
     if a.body:
         names.add("body")
     names |= {n for n in ("unlock", "due", "lock") if getattr(a, n) is not None}
+    if a.assign_to_overrides_only:
+        names.add("assign_to_overrides_only")
     body = _fields(a, names, client, ctx)
     body["published"] = a.published if a.published is not None else ctx.config.defaults.published
     made = client.post(f"/courses/{course}/assignments", json={"assignment": body})
-    return int(made["id"])
+    new_id = int(made["id"])
+    _run_override_steps(client, ctx, new_id, steps)
+    return new_id
 
 
 def update(
     client: CanvasClient, before: CanvasObject, after: CanvasObject, ctx: ApplyContext
 ) -> None:
-    """Only changed fields are sent; override changes are refused before any write."""
+    """Only changed fields are sent. Overrides: names are resolved and live overrides read
+    before the first write; then one call per changed override. Turning on
+    ``assign_to_overrides_only`` happens after the overrides exist, so the audience is never
+    empty. The guard has already run on this operation (CONTRACTS.md section 10)."""
     old, new = _asg(before), _asg(after)
     aid = _canvas_id(old)
     changed = set(assignment_changes(old, new))
-    _require_no_override_change(old, new)
-    body = _fields(new, changed - set(OVERRIDE_FIELDS), client, ctx)
+    steps = (
+        _plan_override_writes(
+            client, ctx, aid, diff_overrides(old.overrides, new.overrides), f"assignment {aid}"
+        )
+        if "overrides" in changed
+        else []
+    )
+    body = _fields(new, changed - {"overrides"}, client, ctx)
+    turning_on = "assign_to_overrides_only" in changed and new.assign_to_overrides_only
+    url = f"/courses/{ctx.config.course_id}/assignments/{aid}"
+    if turning_on:
+        _run_override_steps(client, ctx, aid, steps)
     if body:
-        client.put(f"/courses/{ctx.config.course_id}/assignments/{aid}", json={"assignment": body})
+        client.put(url, json={"assignment": body})
+    if not turning_on:
+        _run_override_steps(client, ctx, aid, steps)
 
 
 def delete(client: CanvasClient, obj: CanvasObject, ctx: ApplyContext) -> None:

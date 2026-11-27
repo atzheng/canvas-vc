@@ -71,6 +71,12 @@ def _assignment_id(op: Operation) -> int | None:
     return None
 
 
+def _unknown_id(ref: str) -> int | None:
+    """The Canvas id in an ``unknown:<id>`` ref, else None."""
+    tail = ref.removeprefix("unknown:")
+    return int(tail) if tail != ref and tail.isdigit() else None
+
+
 def _field(obj: object | None, name: str) -> Any:
     return getattr(obj, name, None) if obj is not None else None
 
@@ -293,14 +299,19 @@ class SubmissionGuard:
 
     def _ids_by_name(self, url: str, names: set[str | None], path: str) -> set[int]:
         wanted = {n for n in names if n is not None}
+        by_id = {n for n in (_unknown_id(w) for w in wanted) if n is not None}
+        wanted = {w for w in wanted if _unknown_id(w) is None}  # "unknown:<id>" carries its id
         if not wanted:
-            return set()
-        return {int(r["id"]) for r in self._get_list(url, path) if r.get("name") in wanted}
+            return by_id
+        found = {int(r["id"]) for r in self._get_list(url, path) if r.get("name") in wanted}
+        return found | by_id
 
     def _student_ids(self, refs: set[str], path: str) -> set[int]:
         """Resolve kept student refs to ids (login_id or sis); aliases are unresolvable."""
+        by_id = {n for n in (_unknown_id(r) for r in refs) if n is not None}
+        refs = {r for r in refs if _unknown_id(r) is None}
         if not refs or self.config.student_ref == "alias":
-            return set()
+            return by_id
         users = self._get_list(
             f"/courses/{self.config.course_id}/users", path, {"enrollment_type[]": ["student"]}
         )
@@ -313,7 +324,7 @@ class SubmissionGuard:
             )
             if ref in refs:
                 out.add(int(u["id"]))
-        return out
+        return out | by_id
 
     # ---- live reads (GET only; fail closed) ---------------------------------------
 

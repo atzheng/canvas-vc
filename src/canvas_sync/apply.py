@@ -12,6 +12,9 @@ Action -> writer call:
   ``update(client, before, after, ctx)``
 - DELETE: ``delete(client, before, ctx)``
 
+A writer module may also define ``preflight(client, before, after, ctx)``: a read-only
+check run for every non-delete operation before anything is written.
+
 Writers must send an explicit null for any field in ``op.changes`` whose new
 value is None (a cleared date).
 """
@@ -116,10 +119,20 @@ def apply(
         raise GuardBlocked(
             "; ".join(f"{o.key.path}: {r.message} (needs {r.needs_confirm})" for o, r in missing)
         )
-    # Pre-flight: nothing is written if the guard refuses any operation.
+    # Pre-flight: nothing is written if the guard refuses any operation, or if a writer's
+    # optional read-only ``preflight(client, before, after, ctx)`` raises (e.g. an override
+    # names a section that cannot be resolved).
     for op in plan.ops:
         if needs_guard(op):
             ctx.guard.assert_allowed(op, confirmed)
+        if (
+            op.after is not None
+            and op.action is not Action.DELETE
+            and (writers is None or op.key.kind in writers)
+        ):
+            check = getattr(_writer(op.key.kind, writers), "preflight", None)
+            if check is not None:
+                check(client, op.before, op.after, ctx)
 
     result = ApplyResult(done=[], failed=None, error=None)
     for op in plan.ops:
