@@ -10,6 +10,7 @@ from canvas_sync.ignore import IgnoreRules
 from canvas_sync.model.base import ObjectKey
 from canvas_sync.model.course import Course
 from canvas_sync.model.roster import RosterCache
+from canvas_sync.progress import NullProgress, Progress
 from canvas_sync.remote.guard import SubmissionGuard
 from canvas_sync.render.bodies import Bodies
 from canvas_sync.snapshot import BlobStore
@@ -37,3 +38,7 @@ class ApplyContext:
     # Writers record (tree path, Markdown, HTML Canvas returned) here after each body write;
     # push dumps it to .canvas/bodies.json so the next fetch reuses the Markdown.
     bodies: Bodies = field(default_factory=Bodies)
+    # Reporting only (CONTRACTS.md section 1a): writers never act on these.
+    progress: Progress = field(default_factory=NullProgress)
+    upload_total: int = 0  # bytes expected from file uploads in this push
+    upload_done: int = 0

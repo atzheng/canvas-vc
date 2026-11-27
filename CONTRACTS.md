@@ -90,8 +90,8 @@ Reporting only: a producer never changes requests, order or results because of i
 `fetch_course` / `files.read_files_meta` take `progress=`; phases in order: `roster`,
 `files` (total = files listed; `bytes` totals the listed sizes, advanced per file whether
 downloaded or cached), `pages`, `assignments`, `announcements` (total = objects in the
-id/path map), `modules`. `fetch` and `pull` take `--quiet`. Push (vtr.5) passes the same
-object to `apply()`.
+id/path map), `modules`. `fetch` and `pull` take `--quiet`. Push passes the same
+object to `apply()` and the post-push fetch.
 
 ## 2. Repository a user edits (the "course tree")
 
@@ -538,6 +538,9 @@ class ApplyContext:
     guard: SubmissionGuard
     blobs: BlobStore
     bodies: Bodies                   # default empty; writers record (path, md, returned html)
+    progress: Progress               # default NullProgress; reporting only (§1a)
+    upload_total: int = 0            # bytes the push will upload (files.upload_bytes); display only
+    upload_done: int = 0             # cumulative uploaded bytes, advanced by files._upload
 ```
 
 `remote/modules.py`: `read(client, ctx, *, paths: Mapping[tuple[Kind, int | str], str] | None = None) -> list[Module]`.
@@ -658,8 +661,16 @@ class ApplyResult:
     new_ids: dict[ObjectKey, int | str]        # to write back into the tree
 
 def apply(plan: Plan, client: CanvasClient, ctx: ApplyContext, *, confirmed: set[str],
-          writers: Mapping[Kind, Writer] | None = None) -> ApplyResult
+          writers: Mapping[Kind, Writer] | None = None,
+          progress: Progress | None = None, phase: str = "pushing") -> ApplyResult
 ```
+
+`apply` reports progress only: `progress.phase(phase, len(plan.ops))`, then per operation
+`advance(0, label="[i/N] <action> <path>")` before and `advance(1, label=same)` after it (the
+pre-flight pass is silent). It never changes requests, order or stop-at-first-failure. `files._upload`
+calls `progress.bytes(upload_done, upload_total)` after each upload (whole-file granularity).
+Push passes one renderer to the first `apply`, the second pass (`phase="relinking"`) and the post-push
+fetch; `canvas push` takes `--quiet`.
 
 `apply` stops at the first failure and returns what it did so far (`done`,
 `failed`, `error`, and `new_ids` of objects already created; `ctx.ids` is

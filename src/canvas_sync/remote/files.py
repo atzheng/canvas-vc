@@ -22,11 +22,13 @@ the course check before every ``PUT``/``DELETE /files/N``.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
 import tempfile
 import unicodedata
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
@@ -38,6 +40,7 @@ from canvas_sync.dates import from_canvas, to_canvas
 from canvas_sync.errors import CanvasAPIError, CanvasSyncError, StaleRemote
 from canvas_sync.model.base import CanvasObject, Kind, ObjectKey
 from canvas_sync.model.files import FileEntry, FileSettings, FilesMeta
+from canvas_sync.plan.core import Action, Operation
 from canvas_sync.plan.files import PlacedFile, canvas_settings
 from canvas_sync.progress import NullProgress, Progress
 from canvas_sync.remote.context import ApplyContext, FetchContext
@@ -432,9 +435,8 @@ def _upload(client: CanvasClient, ctx: ApplyContext, entry: FileEntry) -> dict[s
     did not overwrite)."""
     tree = _tree_path(entry)
     name = _basename(entry)
-    result = client.upload_file(
-        _upload_folder(ctx, entry), name, _content(ctx, entry), on_duplicate="overwrite"
-    )
+    data = _content(ctx, entry)
+    result = client.upload_file(_upload_folder(ctx, entry), name, data, on_duplicate="overwrite")
     fid = result.get("id")
     if not isinstance(fid, int) or isinstance(fid, bool):
         raise CanvasAPIError(0, f"{tree}: upload returned no file id")
@@ -442,7 +444,24 @@ def _upload(client: CanvasClient, ctx: ApplyContext, entry: FileEntry) -> dict[s
     if stored != name:
         raise CanvasSyncError(f"{tree}: Canvas stored the upload as {stored!r}; check the course")
     ctx.ids[ObjectKey(Kind.FILE, tree)] = fid
+    ctx.upload_done += len(data)
+    ctx.progress.bytes(ctx.upload_done, max(ctx.upload_total, ctx.upload_done))
     return result
+
+
+def upload_bytes(ops: Iterable[Operation], ctx: ApplyContext) -> int:
+    """Bytes the file operations in ``ops`` will upload (for progress display only; reads
+    blobs, sends nothing, never raises)."""
+    total = 0
+    for op in ops:
+        if op.key.kind is not Kind.FILE or op.action is Action.DELETE or op.after is None:
+            continue
+        new = _entry(op.after)
+        if op.before is not None and _entry(op.before).sha256 == new.sha256:
+            continue
+        with contextlib.suppress(Exception):
+            total += len(_content(ctx, new))
+    return total
 
 
 def _refuse_existing(client: CanvasClient, ctx: ApplyContext, entry: FileEntry) -> None:

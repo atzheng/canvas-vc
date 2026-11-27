@@ -49,6 +49,8 @@ from canvas_sync.model.modules import Module, ModuleItem
 from canvas_sync.model.roster import RosterCache
 from canvas_sync.plan.core import Action, Operation, Plan, unconfirmed_risks
 from canvas_sync.plan.modules import PlacedItem, module_keys
+from canvas_sync.progress import NullProgress, Progress, rich_progress
+from canvas_sync.remote import files as files_writer
 from canvas_sync.remote import roster
 from canvas_sync.remote.backup import backup
 from canvas_sync.remote.context import ApplyContext, FetchContext
@@ -443,10 +445,12 @@ def run_push(
     confirmed: set[str] | None = None,
     confirm: Callable[[str], bool] | None = None,
     console: Console | None = None,
+    progress: Progress | None = None,
 ) -> PushResult:
     """Push HEAD to Canvas. Raises ``CanvasSyncError`` subclasses for refusals (nothing
     written); returns a result (``ok`` False) when the push stopped part way."""
     out = console or Console()
+    progress = progress or NullProgress()
     confirmed = set(confirmed or ())
     head, main = check_repo(root, allow_dirty=allow_dirty)
     check_validation(root, out)
@@ -487,11 +491,13 @@ def run_push(
         guard=guard,
         blobs=BlobStore(root),
         bodies=bodies,
+        progress=progress,
     )
-    applied = apply(plan, client, ctx, confirmed=confirmed)
+    ctx.upload_total = files_writer.upload_bytes(plan.ops, ctx)
+    applied = apply(plan, client, ctx, confirmed=confirmed, progress=progress)
     result.ops_done = len(applied.done)
     if applied.error is None:
-        applied = _second_pass(plan, ctx, client, ids, confirmed, applied)
+        applied = _second_pass(plan, ctx, client, ids, confirmed, applied, progress)
     if applied.error is not None or applied.failed is not None:
         result.failed, result.error = applied.failed, applied.error
         _report_failure(out, result)
@@ -501,7 +507,7 @@ def run_push(
     expected = _with_ids(target, ctx.ids)
     _move_bodies(ctx.bodies, base, expected)
     fctx = _context(root, config, expected, ctx.bodies)
-    fetched = fetch_course(client, fctx, root=root)
+    fetched = fetch_course(client, fctx, root=root, progress=progress)
     live = {k.path for k in fetched.objects}
     final = Bodies({p: r for p, r in ctx.bodies.entries.items() if p in live})
     result.unexpected = _unexpected(expected, fetched, plan)
@@ -558,11 +564,12 @@ def _second_pass(
     before_ids: dict[ObjectKey, int | str],
     confirmed: set[str],
     first: ApplyResult,
+    progress: Progress | None = None,
 ) -> ApplyResult:
     extra = _rerender_ops(plan, ctx, before_ids)
     if extra.is_empty():
         return first
-    second = apply(extra, client, ctx, confirmed=confirmed)
+    second = apply(extra, client, ctx, confirmed=confirmed, progress=progress, phase="relinking")
     second.done = first.done + second.done
     second.new_ids = {**first.new_ids, **second.new_ids}
     return second
@@ -599,6 +606,7 @@ def push(
     confirm_delete_files: Annotated[
         bool, typer.Option("--confirm-delete-files", help="Allow deleting many files at once")
     ] = False,
+    quiet: Annotated[bool, typer.Option("--quiet", "-q", help="No progress display")] = False,
 ) -> None:
     """Apply the local changes to Canvas."""
     confirmed: set[str] = set()
@@ -614,12 +622,15 @@ def push(
     try:
         root = gitops.repo_root(Path.cwd())
         config = load_config(root)
-        with CanvasClient(
-            str(config.canvas_url),
-            get_token(config),
-            course_id=config.course_id,
-            mode="read" if dry_run else "write",
-        ) as client:
+        with (
+            CanvasClient(
+                str(config.canvas_url),
+                get_token(config),
+                course_id=config.course_id,
+                mode="read" if dry_run else "write",
+            ) as client,
+            rich_progress(quiet) as progress,
+        ):
             result = run_push(
                 root,
                 client,
@@ -629,6 +640,7 @@ def push(
                 allow_dirty=allow_dirty,
                 no_delete=no_delete,
                 confirmed=confirmed,
+                progress=progress,
             )
     except CanvasSyncError as e:
         err.print(f"error: {e}", markup=False, highlight=False)
