@@ -7,8 +7,9 @@ Pairing is by ``canvas_id`` (the topic id), then by tree path for a target witho
   re-derives the same risk at apply time.
 - UPDATE of an announcement that is already posted: ``POSTED_ANNOUNCEMENT`` warning (no
   flag; students may already have been notified).
-- A deleted file is never a DELETE (the allowlist refuses it): it becomes UNPUBLISH with a
-  ``POSTED_ANNOUNCEMENT`` warning. One that is already unpublished produces nothing.
+- A deleted file is a DELETE (the guard refuses it at apply time if the topic has any
+  reply); one that is posted now carries a ``POSTED_ANNOUNCEMENT`` warning. Under
+  ``push --no-delete`` ``unpublish_instead`` turns it into UNPUBLISH.
 
 ``after`` is a ``PlacedAnnouncement`` (an ``Announcement`` plus ``key_path``).
 """
@@ -17,8 +18,6 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import UTC, datetime
-
-from rich.console import Console
 
 from canvas_sync.errors import ValidationError
 from canvas_sync.model.announcement import Announcement
@@ -121,26 +120,33 @@ def diff_type(
     for path, old in sorted(b.items()):
         if path in paired:
             continue
-        if not old.published:
-            Console(stderr=True).print(
-                f"warning: {path}: announcements are never deleted; it is already unpublished",
-                markup=False,
-                highlight=False,
-                soft_wrap=True,
-            )
-            continue
-        msg = f"{path}: announcements are never deleted; unpublishing instead"
+        msg = f"{path}: deleted from Canvas; announcements with replies are refused at push"
+        risks: tuple[Risk, ...] = ()
         if posted_now(old, clock):
-            msg += " (already posted, students may have seen it)"
-        down = _placed(old.model_copy(update={"published": False}), path, old.canvas_id)
+            msg = f"{path}: already posted; students may have seen it, and it is deleted"
+            risks = (Risk(RiskKind.POSTED_ANNOUNCEMENT, msg, None),)
         ops.append(
-            Operation(
-                ObjectKey(Kind.ANNOUNCEMENT, path),
-                Action.UNPUBLISH,
-                old,
-                down,
-                {"published": (True, False)},
-                (Risk(RiskKind.POSTED_ANNOUNCEMENT, msg, None),),
-            )
+            Operation(ObjectKey(Kind.ANNOUNCEMENT, path), Action.DELETE, old, None, {}, risks)
         )
     return ops
+
+
+def unpublish_instead(op: Operation, now: datetime | None = None) -> Operation | None:
+    """``push --no-delete``: the UNPUBLISH that stands in for an announcement DELETE.
+
+    None if the announcement is already unpublished (nothing to do)."""
+    old = op.before
+    if not isinstance(old, Announcement) or not old.published:
+        return None
+    down = _placed(old.model_copy(update={"published": False}), op.key.path, old.canvas_id)
+    msg = f"{op.key.path}: kept (--no-delete); unpublishing instead"
+    if posted_now(old, now or datetime.now(UTC)):
+        msg += " (already posted, students may have seen it)"
+    return Operation(
+        op.key,
+        Action.UNPUBLISH,
+        old,
+        down,
+        {"published": (True, False)},
+        (Risk(RiskKind.POSTED_ANNOUNCEMENT, msg, None),),
+    )

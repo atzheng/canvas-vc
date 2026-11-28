@@ -26,6 +26,7 @@ from canvas_sync.remote.guard import (
     SubmissionGuard,
 )
 from tests.fake_canvas.core import FakeCanvas
+from tests.fake_canvas.discussion_topics import add_announcement, add_reply
 from tests.helpers import guard_fake as gf
 
 NOW = datetime(2026, 3, 1, 12, 0, tzinfo=UTC)
@@ -472,6 +473,47 @@ def test_editing_an_already_posted_announcement_does_not_renotify(fake: FakeCanv
     old = Announcement(canvas_id=3, post_at=NOW - timedelta(days=1))
     new = Announcement(canvas_id=3, post_at=NOW - timedelta(days=1), title="typo fixed")
     make_guard(fake).assert_allowed(ann_op(old, new), set())
+
+
+def ann_delete(canvas_id: int | None) -> Operation:
+    key = ObjectKey(Kind.ANNOUNCEMENT, "announcements/a.md")
+    return op(Action.DELETE, Announcement(canvas_id=canvas_id), None, key=key)
+
+
+def test_announcement_delete_without_replies_is_allowed(fake: FakeCanvas) -> None:
+    t = add_announcement(fake, "Hi")
+    make_guard(fake).assert_allowed(ann_delete(t["id"]), set())
+    assert all(e.method == "GET" for e in fake.log)
+
+
+@pytest.mark.parametrize("count", [1, 5, None, "0", True])
+def test_announcement_delete_refused_unless_count_is_integer_zero(
+    fake: FakeCanvas, count: Any
+) -> None:
+    t = add_announcement(fake, "Hi")
+    topic = fake.state("discussion_topics")["topics"][t["id"]]
+    if count is None:
+        del topic["discussion_subentry_count"]
+    else:
+        topic["discussion_subentry_count"] = count
+    with pytest.raises(GuardBlocked, match="announcements/a.md: .*never deleted"):
+        make_guard(fake).assert_allowed(ann_delete(t["id"]), {CONFIRM_NOTIFY})
+    assert fake.writes() == []
+
+
+def test_announcement_delete_message_names_the_reply_count(fake: FakeCanvas) -> None:
+    t = add_announcement(fake, "Hi")
+    add_reply(fake, t["id"], 2)
+    with pytest.raises(GuardBlocked) as ei:
+        make_guard(fake).assert_allowed(ann_delete(t["id"]), set())
+    assert str(ei.value) == (
+        "announcements/a.md: has 2 replies; announcements with replies are never deleted "
+        "(set published: false to hide it)"
+    )
+
+
+def test_announcement_delete_of_a_missing_topic_is_allowed(fake: FakeCanvas) -> None:
+    make_guard(fake).assert_allowed(ann_delete(999), set())
 
 
 # ---- fail closed, read-only, scope ---------------------------------------------------

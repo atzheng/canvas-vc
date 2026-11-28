@@ -33,7 +33,7 @@ from canvas_sync.errors import (
 from canvas_sync.remote.backup import BackupError
 from tests.fake_canvas.assignments import add_assignment, add_assignment_group
 from tests.fake_canvas.core import FakeCanvas
-from tests.fake_canvas.discussion_topics import add_announcement
+from tests.fake_canvas.discussion_topics import add_announcement, add_reply
 from tests.fake_canvas.modules import add_item, add_module
 from tests.fake_canvas.pages import add_page
 
@@ -365,6 +365,55 @@ def test_no_delete_keeps_canvas_objects(fake: FakeCanvas, s: Seed, repo: Path) -
     assert not any(r.method == "DELETE" for r in fake.log)
     assert any(p["url"] == "notes" for p in fake.state("pages")["pages"].values())
     fake.assert_submissions_intact(snap)
+
+
+@pytest.fixture
+def live(fake: FakeCanvas, s: Seed) -> dict[str, Any]:
+    """A posted announcement; request it before ``repo`` so the clone has it."""
+    return add_announcement(fake, "Live news", "<p>Out now.</p>")
+
+
+def test_deleting_an_announcement_deletes_it_and_backs_it_up(
+    fake: FakeCanvas, s: Seed, live: dict[str, Any], repo: Path, home: Path
+) -> None:
+    (repo / "announcements/live-news.md").unlink()
+    commit(repo)
+    result, out = push(fake, repo)
+    assert result.ok, out
+    assert "already posted" in out  # the warning shows in the plan
+    assert writes(fake) == [f"DELETE /courses/101/discussion_topics/{live['id']}"]
+    assert live["id"] not in fake.state("discussion_topics")["topics"]
+    (file,) = (home / ".canvas-sync" / "backups" / "101").glob("*.json")
+    data = json.loads(file.read_text())
+    assert data["announcements"][str(live["id"])]["title"] == "Live news"
+
+
+def test_deleting_an_announcement_with_a_reply_refuses_the_whole_push(
+    fake: FakeCanvas, s: Seed, live: dict[str, Any], repo: Path
+) -> None:
+    add_reply(fake, live["id"])
+    (repo / "announcements/live-news.md").unlink()
+    edit(repo, "pages/notes.md", "Plain notes.", "Edited notes.")
+    commit(repo)
+    refuses(
+        fake,
+        repo,
+        GuardBlocked,
+        r"announcements/live-news.md: has 1 replies; announcements with replies are never "
+        r"deleted \(set published: false to hide it\)",
+    )
+    assert live["id"] in fake.state("discussion_topics")["topics"]
+
+
+def test_no_delete_unpublishes_a_deleted_announcement(
+    fake: FakeCanvas, s: Seed, live: dict[str, Any], repo: Path
+) -> None:
+    (repo / "announcements/live-news.md").unlink()
+    commit(repo)
+    result, out = push(fake, repo, no_delete=True)
+    assert result.ok, out
+    assert writes(fake) == [f"PUT /courses/101/discussion_topics/{live['id']}"]
+    assert fake.state("discussion_topics")["topics"][live["id"]]["published"] is False
 
 
 def test_ignored_file_is_not_a_delete(fake: FakeCanvas, s: Seed, repo: Path) -> None:

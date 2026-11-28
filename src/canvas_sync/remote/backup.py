@@ -37,7 +37,12 @@ def _refuse_inside_course_repo(directory: Path) -> None:
             raise BackupError("refusing to write a backup inside a course repo")
 
 
-def backup(client: CanvasClient, config: CourseConfig, assignment_ids: Iterable[int]) -> Path:
+def backup(
+    client: CanvasClient,
+    config: CourseConfig,
+    assignment_ids: Iterable[int],
+    announcement_ids: Iterable[int] = (),
+) -> Path:
     """Write ~/.canvas-sync/backups/<course_id>/<UTC timestamp>.json (GET only).
 
     Raises ``BackupError`` on any failure (a missing assignment, an API error, a
@@ -45,6 +50,7 @@ def backup(client: CanvasClient, config: CourseConfig, assignment_ids: Iterable[
     """
     c = config.course_id
     ids = sorted({int(i) for i in assignment_ids})
+    topic_ids = sorted({int(i) for i in announcement_ids})
     try:
         data: dict[str, Any] = {
             "format": FORMAT_VERSION,
@@ -53,6 +59,10 @@ def backup(client: CanvasClient, config: CourseConfig, assignment_ids: Iterable[
             "late_policy": _late_policy(client, c),
             "assignments": {},
         }
+        if topic_ids:  # announcements about to be deleted: the topic JSON (title, message)
+            data["announcements"] = {
+                str(t): client.get_one(f"/courses/{c}/discussion_topics/{t}") for t in topic_ids
+            }
         for aid in ids:
             base = f"/courses/{c}/assignments/{aid}"
             data["assignments"][str(aid)] = {
@@ -66,7 +76,7 @@ def backup(client: CanvasClient, config: CourseConfig, assignment_ids: Iterable[
         raise BackupError(f"backup failed: Canvas API error {e.status}") from None
     except Exception as e:
         raise BackupError(f"backup failed: {type(e).__name__}") from None
-    return _write(backup_dir(config), data, ids)
+    return _write(backup_dir(config), data, ids, topic_ids)
 
 
 def _late_policy(client: CanvasClient, course_id: int) -> Any:
@@ -88,7 +98,9 @@ def _private_dirs(directory: Path) -> None:
         d.chmod(0o700)
 
 
-def _write(directory: Path, data: dict[str, Any], ids: list[int]) -> Path:
+def _write(
+    directory: Path, data: dict[str, Any], ids: list[int], topic_ids: list[int] | None = None
+) -> Path:
     try:
         _refuse_inside_course_repo(directory.resolve())
         _private_dirs(directory)
@@ -108,7 +120,8 @@ def _write(directory: Path, data: dict[str, Any], ids: list[int]) -> Path:
         else:
             raise BackupError("backup failed: no free file name")
         back = json.loads(target.read_text(encoding="utf-8"))
-        if sorted(int(k) for k in back["assignments"]) != ids:
+        got_topics = sorted(int(k) for k in back.get("announcements", {}))
+        if sorted(int(k) for k in back["assignments"]) != ids or got_topics != (topic_ids or []):
             raise BackupError("backup failed: file did not read back")
         return target
     except BackupError:
