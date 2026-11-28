@@ -271,7 +271,7 @@ class Course:
     modules: list[Module]                    # order matters
     roster: Roster
 
-def load_tree(root: Path) -> Course
+def load_tree(root: Path, file_hashes: Mapping[str, str] | None = None) -> Course  # file_hashes: tree path -> sha256, replaces hashing files/ on disk
 def dump_tree(course: Course) -> dict[str, bytes]    # path -> exact file contents
 ```
 
@@ -813,8 +813,12 @@ def is_ancestor(root, a: str, b: str) -> bool
 def unmerged_paths(root) -> list[str]
 def conflict_marker_paths(root) -> list[str]     # tracked text files containing <<<<<<< / >>>>>>>
 def is_clean(root) -> bool
-def read_tree_files(root, commit: str) -> dict[str, bytes]   # for loading canvas/main or HEAD
-def load_course_at(root, commit: str) -> Course             # load_tree over a commit's files
+def read_tree_files(root, commit: str, paths: Collection[str] | None = None) -> dict[str, bytes]  # only `paths` when given
+def load_course_at(root, commit: str, skip_files: Callable[[str], bool] | None = None) -> Course
+    # load_tree over a commit. files/** blobs are NOT materialised: their sha256 comes from
+    # .git/canvas-sha256-cache.json (keyed by git blob id; a miss streams that blob once;
+    # corrupt/missing cache = recompute). skip_files(tree path) omits files (build_plan passes
+    # the .canvasignore matcher). Same Course as loading the extracted tree.
 def merge(root, ref=REMOTE_REF, rebase=False) -> int        # runs git merge/rebase in the work tree; returns exit code
 def fast_forward(root, ref=REMOTE_REF) -> bool             # git merge --ff-only; False if not possible
 def merge_with_output(root, ref=REMOTE_REF, rebase=False) -> tuple[int, str]  # merge + git's one-line message
@@ -948,8 +952,11 @@ Markdown bodies render with `markdown-it-py`, already a dependency.
 `commands/ui.py`; tested):
 - Never builds a `CanvasClient`, never reads a token, never touches the
   network. Binds `127.0.0.1` only (not configurable); no CORS headers.
-- Never writes to the working tree, to refs, or to `.canvas/`. Only `GET`
-  and `HEAD` are served; any other method is `405`.
+- Never writes to the working tree, the index, refs, git objects, `.canvas/`
+  or Canvas. The one allowed write is a derived cache under `.git`
+  (`gitops.load_course_at` keeps `canvas-sha256-cache.json` there, rebuilt
+  if missing or corrupt). Only `GET` and `HEAD` are served; any other
+  method is `405`.
 - Reads the tree through `model.course.load_tree` and `gitops`
   (`load_course_at`, `ahead_behind`, `read_tree_files`, `head_commit`,
   `ref_commit`, `operation_in_progress`, `conflict_marker_paths`,

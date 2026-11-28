@@ -12,14 +12,16 @@ Safety rules for this module:
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import re
 import subprocess
 import tempfile
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from canvas_sync.errors import CanvasSyncError
 
@@ -246,16 +248,21 @@ def is_clean(root: Path) -> bool:
     ).stdout.strip()
 
 
-def read_tree_files(root: Path, commit: str) -> dict[str, bytes]:
+def _tree_blobs(root: Path, commit: str) -> list[tuple[str, str]]:
+    """(path, blob id) of every regular blob in ``commit``'s tree (symlinks skipped)."""
     listing = _run(root, ["ls-tree", "-r", "-z", "--full-tree", commit]).stdout.decode()
-    wanted: list[tuple[str, str]] = []
+    out: list[tuple[str, str]] = []
     for rec in listing.split("\0"):
         if not rec:
             continue
         meta, path = rec.split("\t", 1)
         mode, kind, sha = meta.split()
         if kind == "blob" and mode != "120000":
-            wanted.append((path, sha))
+            out.append((path, sha))
+    return out
+
+
+def _read_blobs(root: Path, wanted: Sequence[tuple[str, str]]) -> dict[str, bytes]:
     if not wanted:
         return {}
     data = _run(
@@ -272,17 +279,114 @@ def read_tree_files(root: Path, commit: str) -> dict[str, bytes]:
     return out
 
 
-def load_course_at(root: Path, commit: str) -> Course:
+def read_tree_files(
+    root: Path, commit: str, paths: Collection[str] | None = None
+) -> dict[str, bytes]:
+    """Contents of the regular files in ``commit`` (only ``paths`` when given)."""
+    wanted = [(p, s) for p, s in _tree_blobs(root, commit) if paths is None or p in paths]
+    return _read_blobs(root, wanted)
+
+
+_SHA256_RE = re.compile(r"[0-9a-f]{64}")
+SHA_CACHE = "canvas-sha256-cache.json"
+_CHUNK = 1 << 20
+
+
+def _sha_cache_path(root: Path) -> Path:
+    return Path(_out(root, ["rev-parse", "--path-format=absolute", "--git-path", SHA_CACHE]))
+
+
+def _load_sha_cache(path: Path) -> dict[str, str]:
+    try:
+        raw: object = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    items = cast("dict[object, object]", raw)
+    return {
+        k: v
+        for k, v in items.items()
+        if isinstance(k, str) and isinstance(v, str) and _SHA256_RE.fullmatch(v)
+    }
+
+
+def _save_sha_cache(path: Path, cache: Mapping[str, str]) -> None:
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    try:
+        tmp.write_text(json.dumps(cache, sort_keys=True), encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError:  # a cache that cannot be written is only a slower next run
+        tmp.unlink(missing_ok=True)
+
+
+def _stream_blob_sha256(root: Path, blob: str) -> str:
+    """sha256 of one blob's contents, streamed from ``git cat-file`` in chunks."""
+    h = hashlib.sha256()
+    with tempfile.TemporaryFile() as err:  # a file, not a pipe: stderr cannot fill and block
+        proc = subprocess.Popen(
+            ["git", "-C", str(root), "cat-file", "blob", blob],
+            stdout=subprocess.PIPE,
+            stderr=err,
+            env=_env(),
+        )
+        try:
+            assert proc.stdout is not None
+            while chunk := proc.stdout.read(_CHUNK):
+                h.update(chunk)
+            rc = proc.wait()
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+            if proc.stdout is not None:
+                proc.stdout.close()
+            proc.wait()
+        if rc != 0:
+            err.seek(0)
+            lines = err.read().decode(errors="replace").strip().splitlines()
+            raise GitError(f"git cat-file failed: {lines[-1] if lines else rc}")
+    return h.hexdigest()
+
+
+def load_course_at(
+    root: Path, commit: str, skip_files: Callable[[str], bool] | None = None
+) -> Course:
+    """``load_tree`` over a commit, without reading ``files/**`` blobs more than once.
+
+    Only non-``files/`` blobs and ``files/_meta.yaml`` are written to a temp dir. Each other
+    ``files/`` blob gets its sha256 from a cache keyed by git blob id (``.git/
+    canvas-sha256-cache.json``; a miss streams that blob and records it). ``skip_files``
+    (tree path -> bool) omits files whose bytes need not be read (e.g. ignored paths).
+    """
     from canvas_sync.model.course import load_tree
 
-    files = read_tree_files(root, commit)
+    small: list[tuple[str, str]] = []
+    big: list[tuple[str, str]] = []
+    for path, sha in _tree_blobs(root, commit):
+        if path.startswith("files/") and path != "files/_meta.yaml":
+            if path.rsplit("/", 1)[-1] != ".DS_Store" and not (skip_files and skip_files(path)):
+                big.append((path, sha))
+        else:
+            small.append((path, sha))
+    cache_path = _sha_cache_path(root)
+    cache = _load_sha_cache(cache_path)
+    dirty = False
+    hashes: dict[str, str] = {}
+    for path, blob in big:
+        digest = cache.get(blob)
+        if digest is None:
+            digest = cache[blob] = _stream_blob_sha256(root, blob)
+            dirty = True
+        hashes[path] = digest
+    if dirty:
+        _save_sha_cache(cache_path, cache)
     with tempfile.TemporaryDirectory(prefix="canvas-tree-") as tmp:
         base = Path(tmp)
-        for path, content in files.items():
+        for path, content in _read_blobs(root, small).items():
             dest = base / path
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_bytes(content)
-        return load_tree(base)
+        return load_tree(base, file_hashes=hashes)
 
 
 def merge_with_output(root: Path, ref: str = REMOTE_REF, rebase: bool = False) -> tuple[int, str]:

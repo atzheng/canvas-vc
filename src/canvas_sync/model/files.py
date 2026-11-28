@@ -21,6 +21,7 @@ from __future__ import annotations
 import hashlib
 import re
 import unicodedata
+from collections.abc import Mapping
 from datetime import time
 from functools import lru_cache
 from pathlib import Path
@@ -441,6 +442,21 @@ def render_files_meta(meta: FilesMeta) -> str:
     return dump_yaml(doc, KEY_ORDER) if doc else ""
 
 
+def _with_hashes(meta: FilesMeta, hashes: Mapping[str, str]) -> FilesMeta:
+    """Like :func:`_with_disk_hashes`, from ``tree path -> sha256`` (not from disk)."""
+    entries = dict(meta.files)
+    for tree_path, sha in hashes.items():
+        rel = _nfc(tree_path.removeprefix(_PREFIX))
+        key = _PREFIX + rel
+        old = entries.get(key)
+        entries[key] = (
+            FileEntry(path=rel, sha256=sha)
+            if old is None
+            else old.model_copy(update={"sha256": sha})
+        )
+    return meta.model_copy(update={"files": entries})
+
+
 def _with_disk_hashes(meta: FilesMeta, root: Path) -> FilesMeta:
     """Make ``meta`` reflect the actual bytes under ``files/``.
 
@@ -473,13 +489,17 @@ class _Spec:
     kind = Kind.FILE
     folder = "files"
 
-    def load_files_meta(self, root: Path, cfg: CourseConfig) -> FilesMeta:
+    def load_files_meta(
+        self, root: Path, cfg: CourseConfig, file_hashes: Mapping[str, str] | None = None
+    ) -> FilesMeta:
         path = root / META_PATH
         meta = (
             parse_files_meta(path.read_text(encoding="utf-8"), cfg)
             if path.exists()
             else FilesMeta()
         )
+        if file_hashes is not None:
+            return _with_hashes(meta, file_hashes)
         return _with_disk_hashes(meta, root)
 
     def dump_files_meta(self, meta: FilesMeta, cfg: CourseConfig) -> dict[str, bytes]:

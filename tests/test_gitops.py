@@ -233,6 +233,97 @@ def test_load_course_at(repo: Path) -> None:
     assert c.config == CONFIG
 
 
+def test_load_course_at_hashes_files_once(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    commit_file(repo, "course.yaml", HAND_EDITED)
+    commit_file(repo, "files/a/x.pdf", "AAA")
+    commit_file(repo, "files/b/.DS_Store", "junk")
+    commit_file(repo, "files/_meta.yaml", "files:\n  a/x.pdf:\n    canvas_id: 7\n")
+    c1 = commit_file(repo, "files/b/y.pdf", "BBB")
+    reads: list[str] = []
+    real = gitops._stream_blob_sha256
+
+    def counting(root: Path, blob: str) -> str:
+        reads.append(blob)
+        return real(root, blob)
+
+    monkeypatch.setattr(gitops, "_stream_blob_sha256", counting)
+    first = gitops.load_course_at(repo, c1)
+    assert len(reads) == 2
+    reads.clear()
+    assert gitops.load_course_at(repo, c1) == first
+    assert reads == []
+    files = first.files_meta.files
+    assert set(files) == {"files/a/x.pdf", "files/b/y.pdf"}
+    assert files["files/a/x.pdf"].canvas_id == 7
+    assert files["files/a/x.pdf"].sha256 == hashlib.sha256(b"AAA").hexdigest()
+    # a byte edit under an unchanged _meta.yaml shows as a different hash; a bad cache is rebuilt
+    c2 = commit_file(repo, "files/a/x.pdf", "AAB")
+    gitops._sha_cache_path(repo).write_text("not json")
+    assert (
+        gitops.load_course_at(repo, c2).files_meta.files["files/a/x.pdf"].sha256
+        == hashlib.sha256(b"AAB").hexdigest()
+    )
+    # skipped paths are not read
+    reads.clear()
+    skipped = gitops.load_course_at(repo, c2, lambda p: p.startswith("files/b/"))
+    assert "files/b/y.pdf" not in skipped.files_meta.files
+    assert reads == []
+
+
+def test_load_course_at_equals_load_tree_on_extracted_tree(repo: Path, tmp_path: Path) -> None:
+    import os
+    import unicodedata
+
+    from canvas_sync.model.course import load_tree
+
+    nfd = unicodedata.normalize("NFD", "caf\u00e9.pdf")
+    (repo / "course.yaml").write_text(HAND_EDITED)
+    for name, data in {
+        "files/top.bin": b"T",
+        "files/a/b/deep.bin": b"D",
+        "files/empty.bin": b"",
+        "files/.DS_Store": b"x",
+        "files/a/.DS_Store": b"y",
+        f"files/{nfd}": b"N",
+        "files/sub/_meta.yaml": b"not a real meta",
+        "files/_meta.yaml": (
+            b"files:\n  top.bin:\n    canvas_id: 3\n  gone.bin:\n    canvas_id: 4\n"
+            b"    sha256: " + b"ab" * 32 + b"\n"
+        ),
+    }.items():
+        p = repo / name
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(data)
+    os.symlink("top.bin", repo / "files/link.bin")
+    run(repo, "add", "-A")
+    run(repo, "commit", "-q", "-m", "c")
+    got = gitops.load_course_at(repo, "HEAD")
+    out = tmp_path / "extract"
+    run(repo, "worktree", "add", "-q", "--detach", str(out), "HEAD")
+    want = load_tree(out)
+    assert got.files_meta == want.files_meta
+    assert "files/gone.bin" in got.files_meta.files
+    assert "files/link.bin" not in got.files_meta.files
+    assert "files/empty.bin" in got.files_meta.files
+
+
+def test_build_plan_ignored_file_only_in_main_plans_no_delete(repo: Path) -> None:
+    from canvas_sync.commands.diff import build_plan
+    from canvas_sync.ignore import IgnoreRules
+
+    commit_file(repo, "course.yaml", HAND_EDITED)
+    commit_file(repo, "files/both.bin", "B")
+    commit_file(repo, "files/only_main.bin", "M")
+    main = commit_file(repo, "files/keep.pdf", "K")
+    run(repo, "rm", "-q", "files/only_main.bin")
+    run(repo, "commit", "-q", "-m", "drop")
+    head = run(repo, "rev-parse", "HEAD")
+    plan = build_plan(
+        repo, IgnoreRules(lines=["files/only_main.bin", "files/both.bin"]), head=head, main=main
+    ).plan
+    assert [o for o in plan.ops if "only_main" in o.key.path or "both" in o.key.path] == []
+
+
 # ---- snapshot ----------------------------------------------------------------------
 
 
