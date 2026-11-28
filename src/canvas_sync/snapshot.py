@@ -100,15 +100,17 @@ def snapshot(
     files[CONFIG_PATH] = _course_yaml(root, course, dumped[CONFIG_PATH], prev)
     files[BODIES_PATH] = bodies.dump()
 
-    prev_files: dict[str, bytes] | None = None
+    # blobs missing from the store fall back to the previous snapshot (e.g. fresh machine,
+    # file not re-downloaded); read only those files from it, in one call
+    missing = {
+        p for p, e in course.files_meta.files.items() if e.sha256 and not blobs.has(e.sha256)
+    }
+    prev_files = gitops.read_tree_files(root, prev, missing) if prev is not None and missing else {}
     for path, entry in course.files_meta.files.items():
         if not entry.sha256:
             continue
-        if not blobs.has(entry.sha256):
-            # fall back to the previous snapshot (e.g. fresh machine, file not re-downloaded)
-            if prev is not None and prev_files is None:
-                prev_files = gitops.read_tree_files(root, prev)
-            old = (prev_files or {}).get(path)
+        if path in missing:
+            old = prev_files.get(path)
             if old is None or hashlib.sha256(old).hexdigest() != entry.sha256:
                 raise CanvasSyncError(f"{path}: contents not in the blob store; fetch it again")
             blobs.put(old)

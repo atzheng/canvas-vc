@@ -233,6 +233,43 @@ def test_load_course_at(repo: Path) -> None:
     assert c.config == CONFIG
 
 
+def test_load_course_at_hashes_files_once(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    commit_file(repo, "course.yaml", HAND_EDITED)
+    commit_file(repo, "files/a/x.pdf", "AAA")
+    commit_file(repo, "files/b/.DS_Store", "junk")
+    commit_file(repo, "files/_meta.yaml", "files:\n  a/x.pdf:\n    canvas_id: 7\n")
+    c1 = commit_file(repo, "files/b/y.pdf", "BBB")
+    reads: list[str] = []
+    real = gitops._stream_blob_sha256
+
+    def counting(root: Path, blob: str) -> str:
+        reads.append(blob)
+        return real(root, blob)
+
+    monkeypatch.setattr(gitops, "_stream_blob_sha256", counting)
+    first = gitops.load_course_at(repo, c1)
+    assert len(reads) == 2
+    reads.clear()
+    assert gitops.load_course_at(repo, c1) == first
+    assert reads == []
+    files = first.files_meta.files
+    assert set(files) == {"files/a/x.pdf", "files/b/y.pdf"}
+    assert files["files/a/x.pdf"].canvas_id == 7
+    assert files["files/a/x.pdf"].sha256 == hashlib.sha256(b"AAA").hexdigest()
+    # a byte edit under an unchanged _meta.yaml shows as a different hash; a bad cache is rebuilt
+    c2 = commit_file(repo, "files/a/x.pdf", "AAB")
+    gitops._sha_cache_path(repo).write_text("not json")
+    assert (
+        gitops.load_course_at(repo, c2).files_meta.files["files/a/x.pdf"].sha256
+        == hashlib.sha256(b"AAB").hexdigest()
+    )
+    # skipped paths are not read
+    reads.clear()
+    skipped = gitops.load_course_at(repo, c2, lambda p: p.startswith("files/b/"))
+    assert "files/b/y.pdf" not in skipped.files_meta.files
+    assert reads == []
+
+
 # ---- snapshot ----------------------------------------------------------------------
 
 

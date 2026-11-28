@@ -7,6 +7,7 @@ loaded objects into ``Course``.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import time
 from pathlib import Path
@@ -97,8 +98,12 @@ def _as_module(o: CanvasObject) -> Module:
     return o
 
 
-def load_tree(root: Path) -> Course:
-    """Read a course tree. Tolerant: date-only values, any key order, CRLF, BOM."""
+def load_tree(root: Path, file_hashes: Mapping[str, str] | None = None) -> Course:
+    """Read a course tree. Tolerant: date-only values, any key order, CRLF, BOM.
+
+    ``file_hashes`` (tree path ``files/...`` -> sha256), when given, replaces hashing the
+    bytes under ``files/`` on disk (``gitops.load_course_at`` passes cached hashes).
+    """
     cfg = load_config(root)
     objects: dict[ObjectKey, CanvasObject] = {}
     files_meta = FilesMeta()
@@ -106,7 +111,7 @@ def load_tree(root: Path) -> Course:
     for kind, spec in model.REGISTRY.items():
         if kind is Kind.FILE:
             if hasattr(spec, "load_files_meta"):
-                files_meta = cast(FilesMetaSpec, spec).load_files_meta(root, cfg)
+                files_meta = cast(FilesMetaSpec, spec).load_files_meta(root, cfg, file_hashes)
             else:
                 loaded = spec.load(root, cfg)
                 files_meta = FilesMeta(files={p: _as_file(o) for p, o in loaded.items()})

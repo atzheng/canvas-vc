@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -89,6 +90,8 @@ class FilesMetaSpec(TypeSpec, Protocol):
     ``FilesMeta.files`` are tree paths (``files/lectures/01.pdf``).
     """
 
-    def load_files_meta(self, root: Path, cfg: CourseConfig) -> FilesMeta: ...
+    def load_files_meta(
+        self, root: Path, cfg: CourseConfig, file_hashes: Mapping[str, str] | None = None
+    ) -> FilesMeta: ...
 
     def dump_files_meta(self, meta: FilesMeta, cfg: CourseConfig) -> dict[str, bytes]: ...

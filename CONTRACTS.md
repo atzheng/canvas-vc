@@ -271,7 +271,7 @@ class Course:
     modules: list[Module]                    # order matters
     roster: Roster
 
-def load_tree(root: Path) -> Course
+def load_tree(root: Path, file_hashes: Mapping[str, str] | None = None) -> Course  # file_hashes: tree path -> sha256, replaces hashing files/ on disk
 def dump_tree(course: Course) -> dict[str, bytes]    # path -> exact file contents
 ```
 
@@ -813,8 +813,12 @@ def is_ancestor(root, a: str, b: str) -> bool
 def unmerged_paths(root) -> list[str]
 def conflict_marker_paths(root) -> list[str]     # tracked text files containing <<<<<<< / >>>>>>>
 def is_clean(root) -> bool
-def read_tree_files(root, commit: str) -> dict[str, bytes]   # for loading canvas/main or HEAD
-def load_course_at(root, commit: str) -> Course             # load_tree over a commit's files
+def read_tree_files(root, commit: str, paths: Collection[str] | None = None) -> dict[str, bytes]  # only `paths` when given
+def load_course_at(root, commit: str, skip_files: Callable[[str], bool] | None = None) -> Course
+    # load_tree over a commit. files/** blobs are NOT materialised: their sha256 comes from
+    # .git/canvas-sha256-cache.json (keyed by git blob id; a miss streams that blob once;
+    # corrupt/missing cache = recompute). skip_files(tree path) omits files (build_plan passes
+    # the .canvasignore matcher). Same Course as loading the extracted tree.
 def merge(root, ref=REMOTE_REF, rebase=False) -> int        # runs git merge/rebase in the work tree; returns exit code
 def fast_forward(root, ref=REMOTE_REF) -> bool             # git merge --ff-only; False if not possible
 def merge_with_output(root, ref=REMOTE_REF, rebase=False) -> tuple[int, str]  # merge + git's one-line message

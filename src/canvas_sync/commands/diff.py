@@ -57,8 +57,8 @@ def build_plan(
             raise CanvasSyncError("no commits yet; nothing to diff")
     if ignore is None:
         ignore = committed_ignore(root, head)
-    base = without_ignored(gitops.load_course_at(root, main), ignore)
-    target = without_ignored(gitops.load_course_at(root, head), ignore)
+    base = without_ignored(gitops.load_course_at(root, main, ignore.ignored), ignore)
+    target = without_ignored(gitops.load_course_at(root, head, ignore.ignored), ignore)
     return PlanTrees(core.diff(base, target), base, target)
 
 
