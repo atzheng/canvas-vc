@@ -323,19 +323,28 @@ def _save_sha_cache(path: Path, cache: Mapping[str, str]) -> None:
 def _stream_blob_sha256(root: Path, blob: str) -> str:
     """sha256 of one blob's contents, streamed from ``git cat-file`` in chunks."""
     h = hashlib.sha256()
-    proc = subprocess.Popen(
-        ["git", "-C", str(root), "cat-file", "blob", blob],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        env=_env(),
-    )
-    assert proc.stdout is not None and proc.stderr is not None
-    while chunk := proc.stdout.read(_CHUNK):
-        h.update(chunk)
-    err = proc.stderr.read()
-    if proc.wait() != 0:
-        lines = err.decode(errors="replace").strip().splitlines()
-        raise GitError(f"git cat-file failed: {lines[-1] if lines else proc.returncode}")
+    with tempfile.TemporaryFile() as err:  # a file, not a pipe: stderr cannot fill and block
+        proc = subprocess.Popen(
+            ["git", "-C", str(root), "cat-file", "blob", blob],
+            stdout=subprocess.PIPE,
+            stderr=err,
+            env=_env(),
+        )
+        try:
+            assert proc.stdout is not None
+            while chunk := proc.stdout.read(_CHUNK):
+                h.update(chunk)
+            rc = proc.wait()
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+            if proc.stdout is not None:
+                proc.stdout.close()
+            proc.wait()
+        if rc != 0:
+            err.seek(0)
+            lines = err.read().decode(errors="replace").strip().splitlines()
+            raise GitError(f"git cat-file failed: {lines[-1] if lines else rc}")
     return h.hexdigest()
 
 

@@ -952,8 +952,11 @@ Markdown bodies render with `markdown-it-py`, already a dependency.
 `commands/ui.py`; tested):
 - Never builds a `CanvasClient`, never reads a token, never touches the
   network. Binds `127.0.0.1` only (not configurable); no CORS headers.
-- Never writes to the working tree, to refs, or to `.canvas/`. Only `GET`
-  and `HEAD` are served; any other method is `405`.
+- Never writes to the working tree, the index, refs, git objects, `.canvas/`
+  or Canvas. The one allowed write is a derived cache under `.git`
+  (`gitops.load_course_at` keeps `canvas-sha256-cache.json` there, rebuilt
+  if missing or corrupt). Only `GET` and `HEAD` are served; any other
+  method is `405`.
 - Reads the tree through `model.course.load_tree` and `gitops`
   (`load_course_at`, `ahead_behind`, `read_tree_files`, `head_commit`,
   `ref_commit`, `operation_in_progress`, `conflict_marker_paths`,

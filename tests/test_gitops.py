@@ -270,6 +270,60 @@ def test_load_course_at_hashes_files_once(repo: Path, monkeypatch: pytest.Monkey
     assert reads == []
 
 
+def test_load_course_at_equals_load_tree_on_extracted_tree(repo: Path, tmp_path: Path) -> None:
+    import os
+    import unicodedata
+
+    from canvas_sync.model.course import load_tree
+
+    nfd = unicodedata.normalize("NFD", "caf\u00e9.pdf")
+    (repo / "course.yaml").write_text(HAND_EDITED)
+    for name, data in {
+        "files/top.bin": b"T",
+        "files/a/b/deep.bin": b"D",
+        "files/empty.bin": b"",
+        "files/.DS_Store": b"x",
+        "files/a/.DS_Store": b"y",
+        f"files/{nfd}": b"N",
+        "files/sub/_meta.yaml": b"not a real meta",
+        "files/_meta.yaml": (
+            b"files:\n  top.bin:\n    canvas_id: 3\n  gone.bin:\n    canvas_id: 4\n"
+            b"    sha256: " + b"ab" * 32 + b"\n"
+        ),
+    }.items():
+        p = repo / name
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(data)
+    os.symlink("top.bin", repo / "files/link.bin")
+    run(repo, "add", "-A")
+    run(repo, "commit", "-q", "-m", "c")
+    got = gitops.load_course_at(repo, "HEAD")
+    out = tmp_path / "extract"
+    run(repo, "worktree", "add", "-q", "--detach", str(out), "HEAD")
+    want = load_tree(out)
+    assert got.files_meta == want.files_meta
+    assert "files/gone.bin" in got.files_meta.files
+    assert "files/link.bin" not in got.files_meta.files
+    assert "files/empty.bin" in got.files_meta.files
+
+
+def test_build_plan_ignored_file_only_in_main_plans_no_delete(repo: Path) -> None:
+    from canvas_sync.commands.diff import build_plan
+    from canvas_sync.ignore import IgnoreRules
+
+    commit_file(repo, "course.yaml", HAND_EDITED)
+    commit_file(repo, "files/both.bin", "B")
+    commit_file(repo, "files/only_main.bin", "M")
+    main = commit_file(repo, "files/keep.pdf", "K")
+    run(repo, "rm", "-q", "files/only_main.bin")
+    run(repo, "commit", "-q", "-m", "drop")
+    head = run(repo, "rev-parse", "HEAD")
+    plan = build_plan(
+        repo, IgnoreRules(lines=["files/only_main.bin", "files/both.bin"]), head=head, main=main
+    ).plan
+    assert [o for o in plan.ops if "only_main" in o.key.path or "both" in o.key.path] == []
+
+
 # ---- snapshot ----------------------------------------------------------------------
 
 
