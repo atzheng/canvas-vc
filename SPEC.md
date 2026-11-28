@@ -376,8 +376,10 @@ Body.
 ```
 
 Once posted, students may already have been notified. `push` warns before
-editing a posted announcement and never deletes one (it unpublishes instead,
-with a warning).
+editing a posted announcement, and again before deleting a posted one.
+Deleting the file deletes the announcement on Canvas (git keeps the content),
+unless it has any reply: replies are student content, so `push` then refuses,
+writing nothing, and tells you to set `published: false` instead.
 
 ### Files: `files/**` and `files/_meta.yaml`
 
@@ -556,11 +558,13 @@ and is unchanged.
 - Deleting a local file and pushing deletes the Canvas object, except that:
   - assignments with submissions are never deleted: `push` refuses, writing
     nothing (see above)
-  - announcements are never deleted: deleting the file unpublishes a published
-    one (with a warning); one that is already unpublished is a no-op with a warning
+  - announcements with any reply (the instructor's included) are never deleted:
+    `push` refuses, writing nothing; set `published: false` to hide it instead.
+    A posted announcement without replies is deleted with a warning
 - An object deleted **on Canvas** shows up after `pull` as a deletion in the
   merge. If you also edited it locally, git reports a modify/delete conflict.
-- `push --no-delete` turns all deletions into unpublishes.
+- `push --no-delete` keeps every Canvas object whose file was deleted, except that a
+  published announcement is unpublished (a deleted one that is already unpublished is kept).
 
 ## Implementation
 

@@ -63,8 +63,14 @@ FORBIDDEN: list[tuple[str, str]] = [
     ("PUT", f"/courses/{C}"),
     ("POST", f"/courses/{C}/conclude"),
     ("DELETE", f"/courses/{C}/"),
-    # discussion topics / announcements
-    ("DELETE", f"/courses/{C}/discussion_topics/9"),
+    # discussion topics / announcements: replies and entries are never writable
+    ("DELETE", f"/courses/{C}/discussion_topics/9/entries/3"),
+    ("POST", f"/courses/{C}/discussion_topics/9/entries"),
+    ("PUT", f"/courses/{C}/discussion_topics/9/entries/3"),
+    ("POST", f"/courses/{C}/discussion_topics/9/entries/3/replies"),
+    ("DELETE", f"/courses/{C}/discussion_topics/9/entries/3/replies/4"),
+    ("DELETE", f"/courses/{C}/discussion_topics"),
+    ("DELETE", f"/courses/{C}/discussion_topics/abc"),
     # quizzes
     ("POST", f"/courses/{C}/quizzes"),
     ("PUT", f"/courses/{C}/quizzes/5"),
@@ -180,9 +186,7 @@ def test_every_allowed_entry_is_course_locked_or_id_scoped() -> None:
             for word in ("submissions", "quizzes", "enrollments"):
                 assert word not in template
     assert not any(
-        m == "DELETE"
-        and ("assignment_groups" in t or "discussion_topics" in t or t.endswith("{c}"))
-        for m, t in ALLOWED
+        m == "DELETE" and ("assignment_groups" in t or t.endswith("{c}")) for m, t in ALLOWED
     )
 
 
@@ -203,7 +207,19 @@ ALLOWED_CALLS: list[tuple[str, str]] = [
     ("PUT", f"/courses/{C}/pages/my%20page"),
     ("PUT", f"/courses/{C}/assignments/1"),
     ("DELETE", f"/courses/{C}/modules/1/items/2"),
+    ("DELETE", f"/courses/{C}/discussion_topics/9"),  # the guard checks replies first
+    ("GET", f"/courses/{C}/discussion_topics/9"),
 ]
+
+
+def test_topic_delete_is_write_mode_only() -> None:
+    client, rec = make(mode="read")
+    with pytest.raises(ForbiddenEndpoint):
+        call(client, "DELETE", f"/courses/{C}/discussion_topics/9")
+    assert rec.requests == []
+    client, rec = make()
+    call(client, "DELETE", f"/courses/{C}/discussion_topics/9")
+    assert len(rec.requests) == 1
 
 
 @pytest.mark.parametrize(("method", "path"), ALLOWED_CALLS)

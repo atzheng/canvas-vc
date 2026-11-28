@@ -174,6 +174,9 @@ def update(
 
 
 def delete(client: CanvasClient, obj: CanvasObject, ctx: ApplyContext) -> None:
-    """Announcements are never deleted (the allowlist refuses it): unpublish instead."""
+    """DELETE the topic. The guard has already refused any announcement with replies
+    (``SubmissionGuard``, section 10); replies are student content."""
     ann = _as_ann(obj)
-    _put(client, ctx, ann, {"published": False})
+    if ann.canvas_id is None:
+        raise CanvasSyncError(f"announcement {ann.title!r} has no Canvas id")
+    client.delete(f"/courses/{ctx.config.course_id}/discussion_topics/{int(ann.canvas_id)}")

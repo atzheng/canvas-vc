@@ -47,6 +47,7 @@ from canvas_sync.model.base import CanvasObject, Kind, ObjectKey
 from canvas_sync.model.course import Course, dump_tree
 from canvas_sync.model.modules import Module, ModuleItem
 from canvas_sync.model.roster import RosterCache
+from canvas_sync.plan.announcements import unpublish_instead
 from canvas_sync.plan.core import Action, Operation, Plan, unconfirmed_risks
 from canvas_sync.plan.modules import PlacedItem, module_keys
 from canvas_sync.progress import Progress, rich_progress, safe
@@ -290,6 +291,21 @@ def _backup_ids(plan: Plan) -> list[int]:
     return sorted(ids)
 
 
+def _announcement_delete_ids(plan: Plan) -> list[int]:
+    """Canvas ids of the announcements the plan deletes (their content is backed up)."""
+    ids: set[int] = set()
+    for op in plan.ops:
+        cid = op.before.canvas_id if op.before is not None else None
+        if (
+            op.key.kind is Kind.ANNOUNCEMENT
+            and op.action is Action.DELETE
+            and isinstance(cid, int)
+            and not isinstance(cid, bool)
+        ):
+            ids.add(cid)
+    return sorted(ids)
+
+
 # ---- second pass: links to objects created later in the same push ----------------------
 
 
@@ -460,7 +476,19 @@ def run_push(
     skipped: list[Operation] = []
     if no_delete:
         skipped = [o for o in plan.ops if o.action is Action.DELETE]
-        plan = Plan([o for o in plan.ops if o.action is not Action.DELETE])
+        kept: list[Operation] = []
+        for o in plan.ops:
+            if o.action is not Action.DELETE:
+                kept.append(o)
+            elif o.key.kind is Kind.ANNOUNCEMENT and (down := unpublish_instead(o)) is not None:
+                kept.append(down)  # announcements are unpublished, not left posted
+                skipped.remove(o)
+                out.print(
+                    f"  unpublished, not deleted (--no-delete): {o.key.path}",
+                    markup=False,
+                    highlight=False,
+                )
+        plan = Plan(kept)
     result = PushResult(ops_total=len(plan.ops), dry_run=dry_run)
     for op in skipped:
         out.print(f"  kept on Canvas (--no-delete): {op.key.path}", markup=False, highlight=False)
@@ -552,8 +580,9 @@ def backup_and_ids(
     """Back up every touched existing assignment (raises ``BackupError``, so nothing is
     written), then return the ids to pre-fill ``ApplyContext.ids`` with."""
     ids = _backup_ids(plan)
-    if ids:
-        backup(client, config, ids)
+    topics = _announcement_delete_ids(plan)
+    if ids or topics:
+        backup(client, config, ids, topics)
     return _existing_ids(target)
 
 

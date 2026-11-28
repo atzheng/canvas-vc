@@ -148,6 +148,8 @@ class SubmissionGuard:
             msg = f"{path}: assignment groups are never deleted (delete empty groups in Canvas)"
             return _Evaluation([Risk(RiskKind.HAS_SUBMISSIONS, msg, None)], [msg])
         if op.key.kind is Kind.ANNOUNCEMENT:
+            if op.action is Action.DELETE:
+                return self._announcement_delete(op)
             return _Evaluation(self._announcement_risks(op), [])
         if op.key.kind is not Kind.ASSIGNMENT or op.action is Action.CREATE:
             return _Evaluation([], [])
@@ -160,6 +162,32 @@ class SubmissionGuard:
             msg = f"{op.key.path}: posts now and emails students; cannot be taken back"
             return [Risk(RiskKind.NOTIFIES_STUDENTS, msg, CONFIRM_NOTIFY)]
         return []
+
+    def _announcement_delete(self, op: Operation) -> _Evaluation:
+        """Refuse to delete an announcement with any reply (replies are student content).
+
+        A missing or non-integer ``discussion_subentry_count`` counts as having replies;
+        a topic already gone on Canvas has nothing to protect."""
+        path = op.key.path
+        tid = _assignment_id(op)
+        if tid is None:
+            return _Evaluation([], [f"{path}: cannot tell which Canvas announcement this is"])
+        live = self._get_optional(f"/courses/{self.config.course_id}/discussion_topics/{tid}", path)
+        if live is None:
+            return _Evaluation([], [])
+        n = live.get("discussion_subentry_count")
+        if isinstance(n, int) and not isinstance(n, bool) and n == 0:
+            return _Evaluation([], [])
+        has = (
+            f"has {n} replies"
+            if isinstance(n, int) and not isinstance(n, bool)
+            else ("reply count unknown")
+        )
+        msg = (
+            f"{path}: {has}; announcements with replies are never deleted "
+            "(set published: false to hide it)"
+        )
+        return _Evaluation([Risk(RiskKind.HAS_SUBMISSIONS, msg, None)], [msg])
 
     def _posted_now(self, obj: object) -> bool:
         if not _field(obj, "published"):

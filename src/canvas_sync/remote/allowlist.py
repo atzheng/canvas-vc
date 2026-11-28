@@ -48,10 +48,11 @@ ALLOWED: list[tuple[str, str]] = [  # (METHOD, path template; {c} = course id)
     ("PUT", r"/courses/{c}/modules/\d+"),
     ("PUT", r"/courses/{c}/modules/\d+/items/\d+"),
     ("PUT", r"/files/\d+"),
-    # --- deletes (assignment deletes are further gated by the live guard) ---
+    # --- deletes (assignment and announcement deletes are further gated by the live guard) ---
     ("DELETE", r"/courses/{c}/pages/[^/]+"),
     ("DELETE", r"/courses/{c}/assignments/\d+"),
     ("DELETE", r"/courses/{c}/assignments/\d+/overrides/\d+"),
+    ("DELETE", r"/courses/{c}/discussion_topics/\d+"),  # only after the guard's replies check
     ("DELETE", r"/courses/{c}/modules/\d+"),
     ("DELETE", r"/courses/{c}/modules/\d+/items/\d+"),
     ("DELETE", r"/files/\d+"),
@@ -71,7 +72,6 @@ _WRITE_DENIED_SEGMENTS = frozenset(
 )
 _DELETE_DENIED = [
     r"/courses/[^/]+",  # deleting / concluding a course
-    r"/courses/[^/]+/discussion_topics/[^/]+",  # announcements are never deleted
     r"/courses/[^/]+/assignment_groups/[^/]+",  # groups are never deleted
 ]
 

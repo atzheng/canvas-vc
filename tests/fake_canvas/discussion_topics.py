@@ -1,11 +1,13 @@
-"""FakeCanvas behaviour for discussion topics and announcements: GET list, POST, PUT.
+"""FakeCanvas behaviour for discussion topics and announcements (GET, POST, PUT, DELETE).
 
 State lives in ``fake.state("discussion_topics")["topics"]`` (``{id: topic dict}``). Use
 ``add_topic`` / ``add_announcement``. ``GET /discussion_topics`` honours
 ``only_announcements=true``. The body is the ``message`` field, as on Canvas.
 POST creates a topic (an announcement with ``is_announcement``) and PUT
-updates only the fields sent (JSON or form). There is no DELETE
-(the allowlist refuses it). Responses carry the sanitized ``message``.
+updates only the fields sent (JSON or form). DELETE removes the topic (whatever its replies:
+the guard is what protects them). Every topic carries ``discussion_subentry_count`` (0 by
+default); ``add_reply`` raises it, and ``add_topic(..., discussion_subentry_count=None)``
+drops the field to model a response without it. Responses carry the sanitized ``message``.
 """
 
 from __future__ import annotations
@@ -31,8 +33,11 @@ def add_topic(
         "published": True,
         "delayed_post_at": None,
         "posted_at": "2026-01-01T00:00:00Z",
+        "discussion_subentry_count": 0,
         **fields,
     }
+    if topic["discussion_subentry_count"] is None:
+        del topic["discussion_subentry_count"]
     _store(fake)[topic["id"]] = topic
     return topic
 
@@ -41,6 +46,12 @@ def add_announcement(
     fake: FakeCanvas, title: str, message: str = "", **fields: Any
 ) -> dict[str, Any]:
     return add_topic(fake, title, message, announcement=True, **fields)
+
+
+def add_reply(fake: FakeCanvas, topic_id: int, n: int = 1) -> None:
+    """Seed ``n`` replies (any author) on a topic."""
+    topic = _store(fake)[topic_id]
+    topic["discussion_subentry_count"] = int(topic.get("discussion_subentry_count", 0)) + n
 
 
 def register(fake: FakeCanvas) -> None:
@@ -87,5 +98,15 @@ def register(fake: FakeCanvas) -> None:
         apply_fields(topic, dict(cast("dict[str, Any]", q.body)))
         return dict(topic)
 
+    def delete_topic(q: Req) -> dict[str, Any]:
+        topic = find(q)
+        del _store(fake)[topic["id"]]
+        return dict(topic)
+
+    def get_topic(q: Req) -> dict[str, Any]:
+        return dict(find(q))
+
+    fake.route("GET", r"/courses/{c}/discussion_topics/(\d+)", get_topic)
     fake.route("POST", r"/courses/{c}/discussion_topics", create_topic)
+    fake.route("DELETE", r"/courses/{c}/discussion_topics/(\d+)", delete_topic)
     fake.route("PUT", r"/courses/{c}/discussion_topics/(\d+)", update_topic)

@@ -24,7 +24,7 @@ from canvas_sync.remote import pages as remote_pages
 from canvas_sync.remote.context import ApplyContext
 from canvas_sync.remote.guard import SubmissionGuard
 from tests.fake_canvas.core import FakeCanvas
-from tests.fake_canvas.discussion_topics import add_announcement
+from tests.fake_canvas.discussion_topics import add_announcement, add_reply
 from tests.fake_canvas.pages import add_page, rename_page
 from tests.test_pages_announcements_reader import ctx_for, make_cfg
 
@@ -310,21 +310,31 @@ def test_publishing_a_draft_notifies_and_editing_posted_warns() -> None:
     assert diff(sched_a, sched_b, differs()).ops[0].risks == ()
 
 
-def test_announcement_delete_becomes_unpublish_with_risk() -> None:
+def test_announcement_delete_is_a_delete_with_posted_warning() -> None:
     base = course({"announcements/hi.md": ann(canvas_id=5)})
     (op,) = diff(base, course({}), differs()).ops
-    assert op.action is Action.UNPUBLISH
+    assert op.action is Action.DELETE and op.after is None
     assert op.key == ObjectKey(Kind.ANNOUNCEMENT, "announcements/hi.md")
     assert op.risks[0].kind is RiskKind.POSTED_ANNOUNCEMENT and op.risks[0].needs_confirm is None
-    assert cast(Announcement, op.after).published is False
+    assert "already posted" in op.risks[0].message
 
 
-def test_deleting_an_unpublished_announcement_does_nothing(
-    capfd: pytest.CaptureFixture[str],
-) -> None:
+def test_deleting_an_unpublished_announcement_is_a_delete_without_risk() -> None:
     base = course({"announcements/hi.md": ann(canvas_id=5, published=False)})
-    assert diff(base, course({}), differs()).is_empty()
-    assert "never deleted" in capfd.readouterr().err
+    (op,) = diff(base, course({}), differs()).ops
+    assert op.action is Action.DELETE and op.risks == ()
+
+
+def test_unpublish_instead_for_no_delete() -> None:
+    base = course({"announcements/hi.md": ann(canvas_id=5)})
+    (op,) = diff(base, course({}), differs()).ops
+    down = plan_ann.unpublish_instead(op)
+    assert down is not None and down.action is Action.UNPUBLISH
+    assert cast(Announcement, down.after).published is False
+    assert down.risks[0].kind is RiskKind.POSTED_ANNOUNCEMENT
+    hidden = course({"announcements/hi.md": ann(canvas_id=5, published=False)})
+    (op2,) = diff(hidden, course({}), differs()).ops
+    assert plan_ann.unpublish_instead(op2) is None
 
 
 # ---- announcements: writers ----
@@ -369,22 +379,71 @@ def test_announcement_update_sends_only_changed_fields_and_clears_post_at() -> N
     assert w.body == {"delayed_post_at": None}
 
 
-def test_announcement_unpublish_never_deletes() -> None:
+def test_announcement_unpublish_writes_only_published_false() -> None:
+    fake = FakeCanvas()
+    t = add_announcement(fake, "Hi", "<p>x</p>")
+    base = course({"announcements/hi.md": ann(canvas_id=t["id"], body="x")})
+    (op,) = diff(base, course({}), differs()).ops
+    down = plan_ann.unpublish_instead(op)
+    assert down is not None
+    res = apply(Plan([down]), fake.client("write"), apply_ctx(fake), confirmed=set())
+    assert res.error is None
+    (w,) = fake.writes()
+    assert w.method == "PUT" and w.body == {"published": False}
+    assert fake.state("discussion_topics")["topics"][t["id"]]["published"] is False
+
+
+def test_announcement_delete_without_replies_deletes_the_topic() -> None:
     fake = FakeCanvas()
     t = add_announcement(fake, "Hi", "<p>x</p>")
     base = course({"announcements/hi.md": ann(canvas_id=t["id"], body="x")})
     plan, _, _ = push(fake, base, course({}))
-    (w,) = fake.writes()
-    assert w.method == "PUT" and w.body == {"published": False}
-    assert fake.state("discussion_topics")["topics"][t["id"]]["published"] is False
-    assert plan.ops[0].action is Action.UNPUBLISH
+    assert plan.ops[0].action is Action.DELETE
+    assert [(w.method, w.path) for w in fake.writes()] == [
+        ("DELETE", f"/courses/101/discussion_topics/{t['id']}")
+    ]
+    assert t["id"] not in fake.state("discussion_topics")["topics"]
 
 
-def test_announcement_delete_writer_unpublishes() -> None:
+def test_announcement_delete_with_a_reply_is_refused_before_any_write() -> None:
+    fake = FakeCanvas()
+    t = add_announcement(fake, "Hi", "<p>x</p>")
+    add_reply(fake, t["id"])
+    other = add_page(fake, "Gone", published=True)
+    base = course(
+        {
+            "pages/gone.md": Page(canvas_id=other["url"], title="Gone"),
+            "announcements/hi.md": ann(canvas_id=t["id"], body="x"),
+        }
+    )
+    plan = diff(base, course({}), differs())
+    with pytest.raises(GuardBlocked, match=r"announcements/hi.md: has 1 replies; .*never deleted"):
+        apply(plan, fake.client("write"), apply_ctx(fake), confirmed=set())
+    assert fake.writes() == []
+    assert t["id"] in fake.state("discussion_topics")["topics"]
+
+
+def test_announcement_with_missing_reply_count_counts_as_having_replies() -> None:
+    fake = FakeCanvas()
+    t = add_announcement(fake, "Hi", "<p>x</p>", discussion_subentry_count=None)
+    assert "discussion_subentry_count" not in fake.state("discussion_topics")["topics"][t["id"]]
+    plan = diff(course({"announcements/hi.md": ann(canvas_id=t["id"])}), course({}), differs())
+    with pytest.raises(GuardBlocked, match="announcements/hi.md: reply count unknown"):
+        apply(plan, fake.client("write"), apply_ctx(fake), confirmed=set())
+    assert fake.writes() == []
+
+
+def test_announcement_already_gone_is_not_blocked_by_the_guard() -> None:
+    fake = FakeCanvas()
+    plan = diff(course({"announcements/hi.md": ann(canvas_id=999)}), course({}), differs())
+    SubmissionGuard(fake.client("read"), CFG).assert_allowed(plan.ops[0], set())
+
+
+def test_announcement_delete_writer_sends_one_delete() -> None:
     fake = FakeCanvas()
     t = add_announcement(fake, "Hi", "<p>x</p>")
     remote_ann.delete(fake.client("write"), ann(canvas_id=t["id"]), apply_ctx(fake))
-    assert [w.method for w in fake.writes()] == ["PUT"]
+    assert [w.method for w in fake.writes()] == ["DELETE"]
 
 
 def test_operation_type_hint() -> None:
